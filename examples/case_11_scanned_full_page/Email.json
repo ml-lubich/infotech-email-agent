@@ -1,0 +1,32 @@
+{
+  "Message": {
+    "Subject": "Cascadia Lab Instruments — scanned invoice for May order",
+    "Body": {
+      "ContentType": "Text",
+      "Content": "Hi Oregon BioSciences AP,\n\nAttached is the scanned copy of our May 2026 invoice under PO OREGON-BIO-PO-4471 (Net 30). Apologies for the scanned format — our ERP is mid-migration, and a clean digital copy will follow next month.\n\nRegards,\nDerek Wong — Cascadia Lab Instruments Inc."
+    },
+    "From": {
+      "EmailAddress": {
+        "Name": "Derek Wong",
+        "Address": "derek.wong@cascadia-lab.example"
+      }
+    },
+    "ToRecipients": [
+      {
+        "EmailAddress": {
+          "Name": "Accounts Payable",
+          "Address": "ap@yourcompany.example"
+        }
+      }
+    ],
+    "Attachments": [
+      {
+        "@odata.type": "#microsoft.graph.fileAttachment",
+        "Name": "Invoice.pdf",
+        "ContentType": "application/pdf",
+        "ContentBytes": null
+      }
+    ],
+    "SentDateTime": "2026-05-05T13:22:00-07:00"
+  }
+}

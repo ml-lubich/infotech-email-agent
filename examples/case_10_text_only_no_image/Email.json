@@ -1,0 +1,32 @@
+{
+  "Message": {
+    "Subject": "BrightLeaf — April office supplies invoice",
+    "Body": {
+      "ContentType": "Text",
+      "Content": "Hello AP,\n\nAttached is the April 2026 office supplies invoice under PO OFC-PO-22019 (Net 30). Standard delivery; nothing unusual.\n\nThanks,\nHannah Ortiz — BrightLeaf Stationery Co."
+    },
+    "From": {
+      "EmailAddress": {
+        "Name": "Hannah Ortiz",
+        "Address": "hannah.ortiz@brightleaf-stationery.example"
+      }
+    },
+    "ToRecipients": [
+      {
+        "EmailAddress": {
+          "Name": "Accounts Payable",
+          "Address": "ap@yourcompany.example"
+        }
+      }
+    ],
+    "Attachments": [
+      {
+        "@odata.type": "#microsoft.graph.fileAttachment",
+        "Name": "Invoice.pdf",
+        "ContentType": "application/pdf",
+        "ContentBytes": null
+      }
+    ],
+    "SentDateTime": "2026-04-30T15:42:00-04:00"
+  }
+}

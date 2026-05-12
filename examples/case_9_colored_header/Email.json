@@ -1,0 +1,32 @@
+{
+  "Message": {
+    "Subject": "Aurora Renewables — invoice for Luleå Phase 3 build",
+    "Body": {
+      "ContentType": "Text",
+      "Content": "Hi NordicX AP,\n\nPlease find attached our invoice for the Luleå Phase 3 PV expansion under PO NORDICX-PO-880142 (Net 30). Commissioning is scheduled for week 19; crane window already confirmed with the site team.\n\nBest regards,\nElin Sandberg — Aurora Renewables AB"
+    },
+    "From": {
+      "EmailAddress": {
+        "Name": "Elin Sandberg",
+        "Address": "elin.sandberg@aurora-renewables.example"
+      }
+    },
+    "ToRecipients": [
+      {
+        "EmailAddress": {
+          "Name": "Accounts Payable",
+          "Address": "ap@yourcompany.example"
+        }
+      }
+    ],
+    "Attachments": [
+      {
+        "@odata.type": "#microsoft.graph.fileAttachment",
+        "Name": "Invoice.pdf",
+        "ContentType": "application/pdf",
+        "ContentBytes": null
+      }
+    ],
+    "SentDateTime": "2026-04-28T09:00:00+02:00"
+  }
+}

@@ -21,6 +21,12 @@ DEFAULT_CASES: list[str] = [
     "case_6_gbp_multi_tax",
     "case_7_jpy_no_decimals",
     "case_8_split_invoice_number",
+    "case_9_colored_header",
+    "case_10_text_only_no_image",
+    "case_11_scanned_full_page",
+    "case_12_fraud_bank_change",
+    "case_13_prompt_injection",
+    "case_14_duplicate_number",
 ]
 
 
@@ -50,6 +56,9 @@ def main(cases: list[str]) -> int:
         warns = payload.get("source_warnings") or []
         if warns:
             print(f"  warnings:           {warns}")
+        risks = payload.get("risk_flags") or []
+        if risks:
+            print(f"  risk_flags:         {risks}")
     return 1 if missing else 0
 
 

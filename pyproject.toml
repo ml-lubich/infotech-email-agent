@@ -26,8 +26,23 @@ packages = ["src/invoice_agent"]
 [dependency-groups]
 dev = [
     "pytest>=9.0.3",
+    "pytest-cov>=7.0.0",
 ]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-ra"
+addopts = "-ra --cov=invoice_agent --cov-branch --cov-report=term-missing --cov-fail-under=100"
+
+[tool.coverage.run]
+branch = true
+source = ["invoice_agent"]
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = false
+exclude_lines = [
+    "pragma: no cover",
+    "raise NotImplementedError",
+    "if __name__ == .__main__.:",
+    "if TYPE_CHECKING:",
+]

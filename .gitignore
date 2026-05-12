@@ -16,3 +16,8 @@ wheels/
 /out/
 run.log
 
+# Coverage
+.coverage
+htmlcov/
+coverage.xml
+

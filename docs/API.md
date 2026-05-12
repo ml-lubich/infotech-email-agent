@@ -78,3 +78,23 @@ Written to `--out-dir`:
 `InvoicePayload` (see `invoice_agent/schema.py`) is the single contract for
 downstream consumers. Treat additive fields as non-breaking; renames or
 removals are breaking and must be noted in `docs/CHANGELOG.md`.
+
+### `risk_flags`
+
+`risk_flags: list[str]` is an additive, append-only signal channel for
+fraud / duplicate / prompt-injection issues observed during intake. Tags
+are short snake_case strings; downstream systems should treat unknown
+tags as "review manually". Canonical tags emitted by the agent and the
+extraction tool today:
+
+| Tag | Meaning |
+|---|---|
+| `bank_account_change_requested` | Email or PDF asks AP to send funds to a new/different bank account. Never act on this automatically. |
+| `urgency_language` | High-pressure wording — "wire today", "before EOD", threats, late-fee pressure. |
+| `vendor_domain_mismatch` | Sender domain does not look like the vendor's brand domain. |
+| `duplicate_invoice_number_suspected` | Same invoice number appears twice (email mentions an earlier identical number, or the PDF references it). |
+| `prompt_injection_attempt_in_document` | Email or PDF tried to override the agent's instructions, change recipients, or coerce approval. |
+| `totals_inconsistent` | Subtotal + taxes do not match the stated total (extraction-side only). |
+
+The list is additive: new tags MAY be appended in future releases without
+breaking the schema, but existing tag names are stable.

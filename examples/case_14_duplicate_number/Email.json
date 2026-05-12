@@ -1,0 +1,32 @@
+{
+  "Message": {
+    "Subject": "Greenstone — May facilities invoice (please verify duplicate)",
+    "Body": {
+      "ContentType": "Text",
+      "Content": "Hi Keystone AP,\n\nAttached is the May 2026 facilities invoice under PO KEYSTONE-PO-FAC-1192 (Net 30).\n\nHeads-up: our system re-used invoice number GFS-2026-FAC-0207, which was also sent in April. Please verify against the prior submission so we do not get paid twice. We will re-number on the June cycle.\n\nThanks,\nMarcia Devlin — Greenstone Facilities Services"
+    },
+    "From": {
+      "EmailAddress": {
+        "Name": "Marcia Devlin",
+        "Address": "marcia.devlin@greenstone-facilities.example"
+      }
+    },
+    "ToRecipients": [
+      {
+        "EmailAddress": {
+          "Name": "Accounts Payable",
+          "Address": "ap@yourcompany.example"
+        }
+      }
+    ],
+    "Attachments": [
+      {
+        "@odata.type": "#microsoft.graph.fileAttachment",
+        "Name": "Invoice.pdf",
+        "ContentType": "application/pdf",
+        "ContentBytes": null
+      }
+    ],
+    "SentDateTime": "2026-05-01T11:15:00-04:00"
+  }
+}

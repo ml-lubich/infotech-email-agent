@@ -39,3 +39,9 @@ class InvoicePayload(BaseModel):
     ship_to: list[ShipTo] = Field(default_factory=list)
     notes: list[str] = Field(default_factory=list)
     source_warnings: list[str] = Field(default_factory=list)
+    # Risk / fraud / duplicate / prompt-injection signals raised by the
+    # extraction step. Free-form short strings — additive, never removed.
+    # Examples: "bank_account_change_requested", "urgency_language",
+    # "vendor_domain_mismatch", "duplicate_invoice_number_suspected",
+    # "prompt_injection_attempt_in_document".
+    risk_flags: list[str] = Field(default_factory=list)

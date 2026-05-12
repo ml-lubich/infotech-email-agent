@@ -17,6 +17,7 @@ def test_invoice_payload_defaults_are_empty_and_null() -> None:
     assert p.ship_to == []
     assert p.notes == []
     assert p.source_warnings == []
+    assert p.risk_flags == []
 
 
 def test_invoice_payload_round_trip_preserves_fields() -> None:
@@ -33,6 +34,10 @@ def test_invoice_payload_round_trip_preserves_fields() -> None:
         ship_to=[ShipTo(location="Toronto HQ", allocation="100%")],
         notes=["net 30"],
         source_warnings=["image vs text mismatch on invoice_number"],
+        risk_flags=[
+            "bank_account_change_requested",
+            "prompt_injection_attempt_in_document",
+        ],
     )
     blob = original.model_dump_json()
     rebuilt = InvoicePayload.model_validate(json.loads(blob))

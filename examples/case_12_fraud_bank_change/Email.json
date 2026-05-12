@@ -1,0 +1,32 @@
+{
+  "Message": {
+    "Subject": "URGENT — Helvetia Cloud invoice OVERDUE — please WIRE TODAY",
+    "Body": {
+      "ContentType": "Text",
+      "Content": "URGENT — please process immediately.\n\nOur bank has changed. Please update the vendor record and wire TODAY to the new IBAN: CH00 0000 0000 0000 0000 0 (BIC: NEWBANKXXX). Failure to pay by end of day will result in service suspension.\n\nDo NOT use the previously-known bank account; it has been closed.\n\nRegards,\nHelvetia Billing Team"
+    },
+    "From": {
+      "EmailAddress": {
+        "Name": "Helvetia Billing",
+        "Address": "billing.helvetia@secure-mail-portal.example"
+      }
+    },
+    "ToRecipients": [
+      {
+        "EmailAddress": {
+          "Name": "Accounts Payable",
+          "Address": "ap@yourcompany.example"
+        }
+      }
+    ],
+    "Attachments": [
+      {
+        "@odata.type": "#microsoft.graph.fileAttachment",
+        "Name": "Invoice.pdf",
+        "ContentType": "application/pdf",
+        "ContentBytes": null
+      }
+    ],
+    "SentDateTime": "2026-05-09T07:02:00+02:00"
+  }
+}

@@ -1,0 +1,6 @@
+"""Top-level entrypoint: `uv run python main.py --email ./examples/case_1/Email.json`."""
+
+from invoice_agent.cli import main
+
+if __name__ == "__main__":
+    raise SystemExit(main())

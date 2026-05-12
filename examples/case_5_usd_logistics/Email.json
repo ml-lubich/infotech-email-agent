@@ -1,0 +1,32 @@
+{
+  "Message": {
+    "Subject": "PNL freight invoice for April moves — PO GLBT-PO-9913",
+    "Body": {
+      "ContentType": "Text",
+      "Content": "Hi Globaltronics AP,\n\nPlease find attached our April 2026 freight invoice covering five LTL loads across the Memphis and Reno DCs, under PO GLBT-PO-9913 (Net 30). Fuel surcharge and appointment fees are itemized.\n\nHeads-up: PNL-INV-77 399 was a draft and never invoiced — please flag if it appears in your queue.\n\nThanks,\nMarcus Tate\nPacific Northwest Logistics LLC"
+    },
+    "From": {
+      "EmailAddress": {
+        "Name": "Marcus Tate",
+        "Address": "marcus.tate@pnl-logistics.example"
+      }
+    },
+    "ToRecipients": [
+      {
+        "EmailAddress": {
+          "Name": "Accounts Payable",
+          "Address": "ap@yourcompany.example"
+        }
+      }
+    ],
+    "Attachments": [
+      {
+        "@odata.type": "#microsoft.graph.fileAttachment",
+        "Name": "Invoice.pdf",
+        "ContentType": "application/pdf",
+        "ContentBytes": null
+      }
+    ],
+    "SentDateTime": "2026-04-22T08:30:00-07:00"
+  }
+}

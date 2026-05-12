@@ -1,0 +1,32 @@
+{
+  "Message": {
+    "Subject": "Albion Print invoice — Spring campaign signage rollout",
+    "Body": {
+      "ContentType": "Text",
+      "Content": "Hello AP,\n\nAttached is our invoice for the Spring 2026 signage rollout under PO HRZN-PO-31204 (Net 45). Two ship-to sites: Manchester flagship and Bristol Cabot Circus. VAT is charged at standard UK rate (20%) — reverse charge does not apply.\n\nNote: pro-forma APS-2026-04-117 was sent earlier for budgeting and should not be paid. This invoice (APS-2026-04-118) is the one to process.\n\nBest,\nPriya Shah — Albion Print & Signage Ltd."
+    },
+    "From": {
+      "EmailAddress": {
+        "Name": "Priya Shah",
+        "Address": "priya.shah@albion-signage.example"
+      }
+    },
+    "ToRecipients": [
+      {
+        "EmailAddress": {
+          "Name": "Accounts Payable",
+          "Address": "ap@yourcompany.example"
+        }
+      }
+    ],
+    "Attachments": [
+      {
+        "@odata.type": "#microsoft.graph.fileAttachment",
+        "Name": "Invoice.pdf",
+        "ContentType": "application/pdf",
+        "ContentBytes": null
+      }
+    ],
+    "SentDateTime": "2026-04-15T11:05:00+01:00"
+  }
+}

@@ -1,0 +1,32 @@
+{
+  "Message": {
+    "Subject": "Helvetia Cloud Consulting — invoice for Q1 2026 engagement",
+    "Body": {
+      "ContentType": "Text",
+      "Content": "Hi AP team,\n\nAttached is the Q1 2026 invoice for Project KESTREL under PO ACME-PO-55821 (Net 30). Services were delivered remotely; no physical shipment.\n\nPlease note this invoice replaces draft INV-2026-0419 which was cancelled — flag if you see both in the system.\n\nThanks,\nLena Brunner\nHelvetia Cloud Consulting GmbH"
+    },
+    "From": {
+      "EmailAddress": {
+        "Name": "Lena Brunner",
+        "Address": "lena.brunner@helvetiacloud.example"
+      }
+    },
+    "ToRecipients": [
+      {
+        "EmailAddress": {
+          "Name": "Accounts Payable",
+          "Address": "ap@yourcompany.example"
+        }
+      }
+    ],
+    "Attachments": [
+      {
+        "@odata.type": "#microsoft.graph.fileAttachment",
+        "Name": "Invoice.pdf",
+        "ContentType": "application/pdf",
+        "ContentBytes": null
+      }
+    ],
+    "SentDateTime": "2026-03-04T09:12:00+01:00"
+  }
+}

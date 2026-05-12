@@ -1,0 +1,32 @@
+{
+  "Message": {
+    "Subject": "桜精密部品 — 第2四半期請求書 (Sakura Precision Q2 invoice)",
+    "Body": {
+      "ContentType": "Text",
+      "Content": "Dear Accounts Payable,\n\nPlease find attached our Q2 2026 invoice covering bearings, shafts and the outgoing QC report under PO KAIRO-PO-2026-441 (Net 30). Amounts are in JPY (no decimals).\n\nYokohama plant receiving requires appointment-based delivery, weekdays 09:00–16:00 JST.\n\nKind regards,\nAiko Tanaka — Sakura Precision Components K.K."
+    },
+    "From": {
+      "EmailAddress": {
+        "Name": "Aiko Tanaka",
+        "Address": "aiko.tanaka@sakura-precision.example"
+      }
+    },
+    "ToRecipients": [
+      {
+        "EmailAddress": {
+          "Name": "Accounts Payable",
+          "Address": "ap@yourcompany.example"
+        }
+      }
+    ],
+    "Attachments": [
+      {
+        "@odata.type": "#microsoft.graph.fileAttachment",
+        "Name": "Invoice.pdf",
+        "ContentType": "application/pdf",
+        "ContentBytes": null
+      }
+    ],
+    "SentDateTime": "2026-05-02T10:20:00+09:00"
+  }
+}

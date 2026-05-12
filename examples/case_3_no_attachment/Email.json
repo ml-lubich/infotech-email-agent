@@ -1,0 +1,25 @@
+{
+    "Message": {
+        "Subject": "Quick question — no invoice attached",
+        "Body": {
+            "ContentType": "Text",
+            "Content": "Hi AP, just checking on PO status. No PDF attached on purpose to exercise the no-attachment error path.\n\nThanks,\nTest Sender"
+        },
+        "From": {
+            "EmailAddress": {
+                "Name": "Test Sender",
+                "Address": "sender@example.com"
+            }
+        },
+        "ToRecipients": [
+            {
+                "EmailAddress": {
+                    "Name": "Accounts Payable",
+                    "Address": "ap@yourcompany.example"
+                }
+            }
+        ],
+        "Attachments": [],
+        "SentDateTime": "2026-02-02T09:00:00-05:00"
+    }
+}

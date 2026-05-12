@@ -1,0 +1,32 @@
+{
+    "Message": {
+        "Subject": "Invoice attached — please process",
+        "Body": {
+            "ContentType": "Text",
+            "Content": "Hi AP, please process the attached invoice. The PDF should be alongside this email, but in this fixture it is intentionally absent to exercise the missing-attachment error path.\n\nThanks,\nTest Sender"
+        },
+        "From": {
+            "EmailAddress": {
+                "Name": "Test Sender",
+                "Address": "sender@example.com"
+            }
+        },
+        "ToRecipients": [
+            {
+                "EmailAddress": {
+                    "Name": "Accounts Payable",
+                    "Address": "ap@yourcompany.example"
+                }
+            }
+        ],
+        "Attachments": [
+            {
+                "@odata.type": "#microsoft.graph.fileAttachment",
+                "Name": "DoesNotExist.pdf",
+                "ContentType": "application/pdf",
+                "ContentBytes": null
+            }
+        ],
+        "SentDateTime": "2026-02-01T09:00:00-05:00"
+    }
+}

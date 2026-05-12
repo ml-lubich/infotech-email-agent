@@ -1,0 +1,32 @@
+{
+  "Message": {
+    "Subject": "Northwind Pharma — May delivery invoice (cold chain) for PO MERIDIAN-PO-CTRL-7782",
+    "Body": {
+      "ContentType": "Text",
+      "Content": "Hi Meridian AP,\n\nAttached please find our May 2026 delivery invoice under PO MERIDIAN-PO-CTRL-7782 (Net 30, 2% within 10 days). Two ship-to sites — Central Pharmacy (cold-chain, controlled) and Hamilton.\n\nImportant: the controlled-substance line (RX-AB-217) requires a licensed pharmacist signature at Central Pharmacy on receipt, and the vaccine pack must stay in cold chain until handover.\n\nThanks,\nRobert Caron — Northwind Pharmaceuticals Distribution"
+    },
+    "From": {
+      "EmailAddress": {
+        "Name": "Robert Caron",
+        "Address": "robert.caron@northwind-pharma.example"
+      }
+    },
+    "ToRecipients": [
+      {
+        "EmailAddress": {
+          "Name": "Accounts Payable",
+          "Address": "ap@yourcompany.example"
+        }
+      }
+    ],
+    "Attachments": [
+      {
+        "@odata.type": "#microsoft.graph.fileAttachment",
+        "Name": "Invoice.pdf",
+        "ContentType": "application/pdf",
+        "ContentBytes": null
+      }
+    ],
+    "SentDateTime": "2026-05-08T08:45:00-04:00"
+  }
+}

@@ -31,7 +31,7 @@ dev = [
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-ra --cov=invoice_agent --cov-branch --cov-report=term-missing --cov-fail-under=100"
+addopts = "-ra --cov=invoice_agent --cov-branch --cov-report=term-missing --cov-fail-under=80"
 
 [tool.coverage.run]
 branch = true

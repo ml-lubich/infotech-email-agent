@@ -1,0 +1,32 @@
+{
+  "Message": {
+    "Subject": "ABC Studio Design — invoice INV-001 (website + logo + content)",
+    "Body": {
+      "ContentType": "Text",
+      "Content": "Hi John,\n\nThanks again for the project! Attached is invoice INV-001 covering everything we agreed:\n\n  • Website design + dev — 10 hours\n  • Logo design — 5 hours\n  • Content writing — 12 hours\n\nTotal $1,520 — Due on Receipt. Easiest payment is PayPal to wiz@abcstudiodesign.example, but bank details are on the invoice if you prefer ACH.\n\nLet me know once you've sent it and I'll fire over the final source files + handoff doc.\n\nCheers,\nAlex B. Carter · ABC Studio Design"
+    },
+    "From": {
+      "EmailAddress": {
+        "Name": "Alex B. Carter",
+        "Address": "contact@abcstudiodesign.example"
+      }
+    },
+    "ToRecipients": [
+      {
+        "EmailAddress": {
+          "Name": "Accounts Payable",
+          "Address": "ap@yourcompany.example"
+        }
+      }
+    ],
+    "Attachments": [
+      {
+        "@odata.type": "#microsoft.graph.fileAttachment",
+        "Name": "Invoice.pdf",
+        "ContentType": "application/pdf",
+        "ContentBytes": null
+      }
+    ],
+    "SentDateTime": "2028-10-16T14:20:00-04:00"
+  }
+}

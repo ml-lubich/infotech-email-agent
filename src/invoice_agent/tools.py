@@ -89,12 +89,15 @@ def _extract_invoice_from_pdf_impl(pdf_path: str) -> str:
     Agents SDK's tool-invocation pipeline.
     """
     path = Path(pdf_path).expanduser().resolve()
+    log.info("extract start pdf=%s model=%s", path, _EXTRACT_MODEL)
     content = extract_pdf_content(path)
+    img_dims = ", ".join(f"{i.width}x{i.height}" for i in content.images) or "(none)"
     log.info(
-        "pdf parsed pages=%d text_chars=%d images=%d",
+        "pdf parsed pages=%d text_chars=%d images=%d image_dims=[%s]",
         len(content.page_texts),
         len(content.text),
         len(content.images),
+        img_dims,
     )
 
     user_content: list[dict[str, object]] = [
@@ -109,6 +112,8 @@ def _extract_invoice_from_pdf_impl(pdf_path: str) -> str:
             }
         )
 
+    log.info("extract calling OpenAI responses.parse model=%s images_inlined=%d",
+             _EXTRACT_MODEL, len(content.images))
     client = OpenAI()
     response = client.responses.parse(
         model=_EXTRACT_MODEL,
@@ -121,10 +126,30 @@ def _extract_invoice_from_pdf_impl(pdf_path: str) -> str:
 
     payload = response.output_parsed
     if payload is None:
+        log.error("extract FAILED model=%s no parsed payload", _EXTRACT_MODEL)
         raise RuntimeError(
             "Extraction model returned no parsed payload; "
             f"raw output: {(response.output_text or '')[:500]!r}"
         )
+    log.info(
+        "extract OK vendor=%r invoice_number=%r currency=%s total_due=%s "
+        "subtotal=%s line_items=%d taxes=%d ship_to=%d notes=%d",
+        payload.vendor_name,
+        payload.invoice_number,
+        payload.currency,
+        payload.total_due,
+        payload.subtotal,
+        len(payload.line_items),
+        len(payload.taxes),
+        len(payload.ship_to),
+        len(payload.notes),
+    )
+    if payload.risk_flags:
+        log.warning("extract RISK FLAGS=%s", payload.risk_flags)
+    else:
+        log.info("extract risk_flags=[] (none raised by extractor)")
+    if payload.source_warnings:
+        log.warning("extract source_warnings=%s", payload.source_warnings)
     return payload.model_dump_json()
 
 
@@ -180,6 +205,35 @@ def _send_customer_service_notification_impl(
 ) -> str:
     """Plain-Python implementation; the @function_tool wrapper delegates here."""
     out_dir = Path(os.getenv(OUT_DIR_ENV, ".")).expanduser().resolve()
+    log.info(
+        "notify start summary_chars=%d payload_chars=%d out_dir=%s",
+        len(summary_markdown), len(payload_json), out_dir,
+    )
+    # Best-effort decision summary from the merged payload (does not
+    # mutate it). Failures here are non-fatal — write_notification_files
+    # still validates JSON and raises on real problems.
+    try:
+        parsed_preview = json.loads(payload_json)
+    except json.JSONDecodeError:
+        parsed_preview = None
+    if isinstance(parsed_preview, dict):
+        flags = parsed_preview.get("risk_flags") or []
+        warnings = parsed_preview.get("source_warnings") or []
+        ec = parsed_preview.get("email_context") or {}
+        log.info(
+            "notify decision vendor=%r invoice_number=%r currency=%s total_due=%s "
+            "po=%r sender_domain=%r",
+            parsed_preview.get("vendor_name"),
+            parsed_preview.get("invoice_number"),
+            parsed_preview.get("currency"),
+            parsed_preview.get("total_due"),
+            ec.get("po_number") or ec.get("PO") if isinstance(ec, dict) else None,
+            ec.get("sender_domain") if isinstance(ec, dict) else None,
+        )
+        if flags:
+            log.warning("notify FORWARDED risk_flags=%s", flags)
+        if warnings:
+            log.warning("notify forwarded source_warnings=%s", warnings)
     txt_path, json_path = write_notification_files(
         summary_markdown, payload_json, out_dir
     )

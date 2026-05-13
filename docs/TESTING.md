@@ -18,6 +18,14 @@ the pure / deterministic surfaces — no OpenAI calls, no agent runs.
 uv run pytest
 ```
 
+Coverage is **gated at 100% line + branch** (configured in
+`pyproject.toml` via `pytest-cov`: `--cov=invoice_agent --cov-branch
+--cov-fail-under=100`). `pytest` exits non-zero if any line or branch in
+`src/invoice_agent/` is uncovered. The two `@function_tool`-decorated
+wrapper bodies are single-line delegations to `_impl` functions and are
+marked `# pragma: no cover` (they only execute through the Agents SDK's
+tool dispatcher; their work is covered via the `_impl` symbols).
+
 Coverage map:
 
 - `tests/test_models.py` — `resolve_model` allow-list policy (`gpt-5-mini`,
@@ -28,15 +36,29 @@ Coverage map:
 - `tests/test_pdf_extract.py` — runs `extract_pdf_content` against the
   real `examples/case_1/Invoice.pdf` (asserts text + at least one PNG-
   normalized embedded image); error paths for missing and unreadable PDFs.
+- `tests/test_pdf_extract_branches.py` — monkey-patches PyMuPDF/Pillow to
+  trigger every defensive `try/except` branch (text-engine failure,
+  image-table failure, `extract_image` failure, missing image bytes,
+  Pillow failure, sub-`_MIN_IMAGE_SIDE` filtering).
 - `tests/test_tools.py` — `write_notification_files` writes both
   `outbound_email.txt` and `outbound_email.json` to a real tmp dir,
   creates missing parents, rejects invalid JSON; checks
   `send_customer_service_notification` is registered as a FunctionTool.
+- `tests/test_extract_tool.py` — `_extract_invoice_from_pdf_impl` against
+  a mocked `OpenAI` client (happy path + `output_parsed is None` error,
+  with and without `output_text`); `_send_customer_service_notification_impl`
+  with and without `INVOICE_OUT_DIR` set; `_user_payload` helper.
 - `tests/test_cli.py` — `_parse_args`, `_resolve_out_dir`, and the four
   `main()` error-path exit codes (missing key=2, missing email=2,
   missing PDF=1, missing attachment=1).
+- `tests/test_end_to_end.py` — `agent.run_intake` happy path with a
+  stubbed `Runner.run_sync` (sibling-PDF auto-resolution and explicit
+  `--pdf` override), attachment-without-name skip path, missing-email and
+  missing-PDF raises, and `cli.main` success / unexpected-exception
+  paths.
 - `tests/test_agent.py` — `build_agent` produces an agent named
-  `InvoiceIntakeAgent`, model in `ALLOWED_MODELS`, exactly two tools.
+  `InvoiceIntakeAgent`, model in `ALLOWED_MODELS`, exactly two tools, and
+  the system prompt carries the trust-boundary + risk-flag taxonomy.
 
 Side-effect policy: file-writing tests use real `tmp_path` writes — the
 filesystem is not mocked (see "Side effects" below).

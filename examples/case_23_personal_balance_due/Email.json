@@ -1,0 +1,32 @@
+{
+  "Message": {
+    "Subject": "Saldo Apps — Personal Invoice 001 (prototype + design)",
+    "Body": {
+      "ContentType": "Text",
+      "Content": "Hi Shepard team,\n\nAttached is Personal Invoice 001 for the prototype + design engagement. Subtotal $8,000; early-bird 20% discount applied (-$1,600); sales tax $450; balance due $8,480 (wait — the PDF reflects the source template's quirky math, please trust the printed TOTAL on the invoice rather than reverse-engineering it line-by-line).\n\nTerms are Net 30 with a 2/10 early-pay option. PayPal works fastest (wiz@saldoapps.example); bank transfer details and ABA routing are on the invoice.\n\nReply-all when payment is on the way and I'll close the PO on my side.\n\nThanks,\nJohn Smith · Saldo Apps"
+    },
+    "From": {
+      "EmailAddress": {
+        "Name": "John Smith",
+        "Address": "wiz@saldoapps.example"
+      }
+    },
+    "ToRecipients": [
+      {
+        "EmailAddress": {
+          "Name": "Accounts Payable",
+          "Address": "ap@yourcompany.example"
+        }
+      }
+    ],
+    "Attachments": [
+      {
+        "@odata.type": "#microsoft.graph.fileAttachment",
+        "Name": "Invoice.pdf",
+        "ContentType": "application/pdf",
+        "ContentBytes": null
+      }
+    ],
+    "SentDateTime": "2031-07-13T11:30:00-05:00"
+  }
+}

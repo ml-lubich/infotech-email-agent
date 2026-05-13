@@ -1,0 +1,32 @@
+{
+  "Message": {
+    "Subject": "Northgate Studio — March 2025 invoice for Greenwood Rowhomes",
+    "Body": {
+      "ContentType": "Text",
+      "Content": "Hi Sarah,\n\nAttached is our March 2025 progress invoice for Greenwood Rowhomes (project GR-RW-25). It covers SD + DD billed at 100%, CD billed at 100% of phase fee (in progress), CA held for next phase, plus Change Order #1 (patio layout, approved Feb 20).\n\nReimbursables: large-format prints and one site visit. Retainage of 5% is held back per contract and will be released at substantial completion.\n\nNet 30 — due 31 March 2025. Reply if you'd like a separate breakdown for the lender draw package.\n\nThanks,\nElena Park, AIA · Northgate Studio Architecture\n(206) 555-0123 · info@northgatestudio.example"
+    },
+    "From": {
+      "EmailAddress": {
+        "Name": "Elena Park, AIA",
+        "Address": "elena.park@northgatestudio.example"
+      }
+    },
+    "ToRecipients": [
+      {
+        "EmailAddress": {
+          "Name": "Accounts Payable",
+          "Address": "ap@yourcompany.example"
+        }
+      }
+    ],
+    "Attachments": [
+      {
+        "@odata.type": "#microsoft.graph.fileAttachment",
+        "Name": "Invoice.pdf",
+        "ContentType": "application/pdf",
+        "ContentBytes": null
+      }
+    ],
+    "SentDateTime": "2025-03-01T10:00:00-08:00"
+  }
+}

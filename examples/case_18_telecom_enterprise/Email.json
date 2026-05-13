@@ -1,0 +1,32 @@
+{
+  "Message": {
+    "Subject": "Vanta Telecom — April 2026 enterprise invoice (with SLA credit)",
+    "Body": {
+      "ContentType": "Text",
+      "Content": "Hi Meridian AP and Procurement,\n\nPlease find attached the April 2026 enterprise invoice (VTE-2026-04-ENT-9921) under PO MERIDIAN-TELCO-PO-2026-7. Terms remain Net 45 per the enterprise SLA contract.\n\nHighlights:\n  • SIP / MPLS / mobile / conference all on the usual run-rate.\n  • SLA breach credit of £415.00 applied for the Edinburgh     circuit outage on 28 April 2026 (incident INC-2026-04-118     — 4h 12m hard down). Root-cause report attached separately.\n  • Mobile data pool overage of 318 GB — the bulk came from     the Manchester contact centre rollout. Suggest revisiting     pool sizing at the next review window.\n\nCost-centre allocation per the master agreement:\n  - LDN-HQ-CORE-001   55%\n  - EDI-OPS-204       25%\n  - MAN-CC-330        20%\n\nIf anything looks off, reply-all and I will loop in your service-delivery manager Tom Bryant.\n\nKind regards,\nOlivia Reeves · Enterprise Billing · Vanta Telecom\n+44 20 7946 0815 · olivia.reeves@vantatelecom.example"
+    },
+    "From": {
+      "EmailAddress": {
+        "Name": "Olivia Reeves",
+        "Address": "olivia.reeves@vantatelecom.example"
+      }
+    },
+    "ToRecipients": [
+      {
+        "EmailAddress": {
+          "Name": "Accounts Payable",
+          "Address": "ap@yourcompany.example"
+        }
+      }
+    ],
+    "Attachments": [
+      {
+        "@odata.type": "#microsoft.graph.fileAttachment",
+        "Name": "Invoice.pdf",
+        "ContentType": "application/pdf",
+        "ContentBytes": null
+      }
+    ],
+    "SentDateTime": "2026-05-01T08:35:00+01:00"
+  }
+}

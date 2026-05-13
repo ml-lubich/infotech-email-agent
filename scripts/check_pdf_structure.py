@@ -45,6 +45,13 @@ CHECKS: list[StructureCheck] = [
     # case_14: duplicate invoice-number scenario; number on the stamp AND
     # intentionally repeated in the notes (the duplicate trap is the point).
     StructureCheck("examples/case_14_duplicate_number/Invoice.pdf", "GFS-2026-FAC-0207", True),
+    # Showcase cases (15-18): polished real-template-inspired layouts.
+    # Invoice number is rendered in the header bar TEXT, so it is expected
+    # to be recoverable from the PDF text path.
+    StructureCheck("examples/case_15_saas_subscription/Invoice.pdf", "LTC-2026-SUB-014872", True),
+    StructureCheck("examples/case_16_cloud_services_bill/Invoice.pdf", "NCS-2026-04-USAGE-7728190", True),
+    StructureCheck("examples/case_17_freelance_designer/Invoice.pdf", "MO-2026-0419", True),
+    StructureCheck("examples/case_18_telecom_enterprise/Invoice.pdf", "VTE-2026-04-ENT-9921", True),
 ]
 
 

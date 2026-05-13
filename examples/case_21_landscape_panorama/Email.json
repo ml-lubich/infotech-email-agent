@@ -1,0 +1,32 @@
+{
+  "Message": {
+    "Subject": "Acme Solutions — invoice INV-1047 (laptops, chairs, IT setup, training)",
+    "Body": {
+      "ContentType": "Text",
+      "Content": "Hi Michael,\n\nAttached is invoice INV-1047 for the equipment + services package we agreed under PO CUST-4589:\n\n  • 2 × business laptops (Model X200)\n  • 4 × ergonomic chairs (Model C300)\n  • 5 hours IT system setup & optimization\n  • 3 hours staff training\n\nVolume discount applied ($100). Tax and shipping itemised separately. Net 14 — due 08 September 2025.\n\nHardware will ship within three business days; I'll send tracking once it leaves the warehouse.\n\nBest,\nSarah Johnson · Acme Solutions LLC · (555) 555-5555"
+    },
+    "From": {
+      "EmailAddress": {
+        "Name": "Sarah Johnson",
+        "Address": "sara@acme.solutions.example"
+      }
+    },
+    "ToRecipients": [
+      {
+        "EmailAddress": {
+          "Name": "Accounts Payable",
+          "Address": "ap@yourcompany.example"
+        }
+      }
+    ],
+    "Attachments": [
+      {
+        "@odata.type": "#microsoft.graph.fileAttachment",
+        "Name": "Invoice.pdf",
+        "ContentType": "application/pdf",
+        "ContentBytes": null
+      }
+    ],
+    "SentDateTime": "2025-08-25T09:15:00-05:00"
+  }
+}

@@ -1,0 +1,32 @@
+{
+  "Message": {
+    "Subject": "Thynk Unlimited — invoice 01234 (brand identity package)",
+    "Body": {
+      "ContentType": "Text",
+      "Content": "Hi Richard,\n\nAttached is invoice 01234 covering the brand identity package we wrapped up this week (consultation, logo, website, social templates, photography and brand guide). Net 30, due 04 January 2031.\n\nBank transfer details are on the invoice; reply with the transfer confirmation when sent and I'll mark it paid.\n\nThanks again for the trust!\nFaisal · Thynk Unlimited"
+    },
+    "From": {
+      "EmailAddress": {
+        "Name": "Faisal Mart",
+        "Address": "faisal.mart@thynkunlimited.example"
+      }
+    },
+    "ToRecipients": [
+      {
+        "EmailAddress": {
+          "Name": "Accounts Payable",
+          "Address": "ap@yourcompany.example"
+        }
+      }
+    ],
+    "Attachments": [
+      {
+        "@odata.type": "#microsoft.graph.fileAttachment",
+        "Name": "Invoice.pdf",
+        "ContentType": "application/pdf",
+        "ContentBytes": null
+      }
+    ],
+    "SentDateTime": "2030-12-05T16:40:00-05:00"
+  }
+}

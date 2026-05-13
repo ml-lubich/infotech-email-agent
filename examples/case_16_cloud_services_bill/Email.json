@@ -1,0 +1,32 @@
+{
+  "Message": {
+    "Subject": "Nimbus Cloud Services — April 2026 usage statement (account 4471-9920-5532)",
+    "Body": {
+      "ContentType": "Text",
+      "Content": "Hello Orion Cloud Operations,\n\nYour consolidated April 2026 usage statement is attached for account 4471-9920-5532 (statement window 2026-04-01 to 2026-04-30). Payment is due 2026-05-17 (Net 15).\n\nNotable items this cycle:\n  • Compute and storage tracking within budget.\n  • Data egress is +38% month-over-month — most likely the new     nightly export job; please review.\n  • Enterprise Discount Program credit applied (-$245.00).\n\nDetailed CSV line-item export is available in the billing console: https://console.nimbuscloud.example/billing/orion.\n\nFor volume-pricing questions, reach out to your account manager Priscilla Chen (priscilla.chen@nimbuscloud.example).\n\n— Nimbus Cloud Services Billing"
+    },
+    "From": {
+      "EmailAddress": {
+        "Name": "Nimbus Cloud Billing",
+        "Address": "billing-noreply@nimbuscloud.example"
+      }
+    },
+    "ToRecipients": [
+      {
+        "EmailAddress": {
+          "Name": "Accounts Payable",
+          "Address": "ap@yourcompany.example"
+        }
+      }
+    ],
+    "Attachments": [
+      {
+        "@odata.type": "#microsoft.graph.fileAttachment",
+        "Name": "Invoice.pdf",
+        "ContentType": "application/pdf",
+        "ContentBytes": null
+      }
+    ],
+    "SentDateTime": "2026-05-02T03:14:00-07:00"
+  }
+}

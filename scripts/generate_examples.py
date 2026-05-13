@@ -81,7 +81,61 @@ class LineItem:
         return round(self.qty * self.unit_price, 2)
 
 
-ImageMode = Literal["stamp_only", "text_only", "scan_page"]
+ImageMode = Literal[
+    "stamp_only",
+    "text_only",
+    "scan_page",
+    "showcase",
+    "minimal_portrait",   # tall, lots of whitespace, big "INVOICE" wordmark
+    "banded_grid",        # dense multi-section grid (services + reimbursables + summary)
+    "landscape_panorama", # horizontal A4-ish, boxed meta, two-col provider/client
+]
+
+
+@dataclass(frozen=True)
+class ShowcaseStyle:
+    """Visual palette for the polished, real-template-inspired invoices."""
+
+    primary: RGB                # header bar / total band
+    accent: RGB                 # secondary stripes / column headers
+    soft: RGB                   # alternating row background
+    text_on_primary: RGB = (1.0, 1.0, 1.0)
+    text_on_soft: RGB = (0.10, 0.12, 0.16)
+    logo_text: str = ""         # e.g. "STRIPE" / "AWS"
+    logo_glyph: str = "■"
+
+
+# Inspired by widely-recognized SaaS/cloud/freelance/telecom invoice
+# layouts. Colors only — no logos or trademarks copied.
+SHOWCASE_STRIPE = ShowcaseStyle(
+    primary=(0.40, 0.35, 0.94),       # indigo
+    accent=(0.16, 0.18, 0.27),
+    soft=(0.95, 0.96, 1.00),
+    logo_text="LATTICE BILLING",
+    logo_glyph="◆",
+)
+SHOWCASE_AWS = ShowcaseStyle(
+    primary=(0.13, 0.21, 0.36),       # deep slate-blue
+    accent=(0.95, 0.55, 0.10),        # orange accent
+    soft=(0.96, 0.96, 0.94),
+    logo_text="NIMBUS CLOUD SERVICES",
+    logo_glyph="☁",
+)
+SHOWCASE_DESIGNER = ShowcaseStyle(
+    primary=(0.10, 0.10, 0.12),       # near-black, editorial
+    accent=(0.95, 0.30, 0.40),        # coral
+    soft=(0.98, 0.96, 0.94),
+    text_on_primary=(0.98, 0.96, 0.94),
+    logo_text="MAYA OKONKWO — DESIGN STUDIO",
+    logo_glyph="✷",
+)
+SHOWCASE_TELCO = ShowcaseStyle(
+    primary=(0.00, 0.45, 0.40),       # teal
+    accent=(0.85, 0.85, 0.85),
+    soft=(0.94, 0.97, 0.96),
+    logo_text="VANTA TELECOM ENTERPRISE",
+    logo_glyph="◉",
+)
 
 
 @dataclass(frozen=True)
@@ -115,6 +169,26 @@ class InvoiceSpec:
     image_mode: ImageMode = "stamp_only"
     # Optional branded header band drawn behind the vendor block.
     header: HeaderStyle = field(default_factory=lambda: HEADER_PLAIN)
+    # Visual palette used when image_mode='showcase'. Ignored otherwise.
+    showcase: ShowcaseStyle | None = None
+    # Optional payment-details block rendered in the showcase footer
+    # (real invoices almost always include this — bank, IBAN/ACH, etc.).
+    payment_details: list[str] = field(default_factory=list)
+    # Optional extra named sub-sections rendered ABOVE the totals panel.
+    # Used by image_mode='banded_grid' to model architectural/professional
+    # invoices that group line items into "Services", "Reimbursable
+    # Expenses", etc. Each tuple is (section_title, [LineItem, ...]).
+    extra_sections: list[tuple[str, list[LineItem]]] = field(default_factory=list)
+    # Optional flat discount applied to the subtotal BEFORE tax.
+    discount: float = 0.0
+    discount_label: str = "Discount"
+    # Optional retainage (% of services held back, common in construction
+    # / architecture invoices). Subtracted from the grand total.
+    retainage_rate: float = 0.0
+    # Optional shipping/handling line added to the totals panel.
+    shipping: float = 0.0
+    # Optional signature blurb rendered at the very bottom (minimal layout).
+    signature_name: str = ""
 
 
 def _make_stamp(invoice_number: str) -> bytes:
@@ -265,8 +339,582 @@ def _render_scan_page(spec: InvoiceSpec) -> bytes:
     return buf.getvalue()
 
 
+def _build_showcase_pdf(spec: InvoiceSpec, out_path: Path) -> None:
+    """Render a polished, real-template-inspired invoice.
+
+    Layout (top to bottom):
+      - Tall colored header bar with vendor logo block + INVOICE / number.
+      - Meta grid (issue date, due date, terms, currency, PO).
+      - Bill-to / Ship-to columns.
+      - Zebra-striped line-item table with colored column header.
+      - Totals panel (subtotal, tax, total) on accent background.
+      - Payment-details footer block + notes.
+      - Small "QR-style" square in the corner (decorative, not a real QR).
+
+    The invoice number is placed in the colored header bar TEXT (so the
+    text path can recover it) — these cases are about visual polish, not
+    image-OCR tricks.
+    """
+    style = spec.showcase or SHOWCASE_STRIPE
+    subtotal = round(sum(li.total for li in spec.line_items), 2)
+    tax = round(subtotal * spec.tax_rate, 2)
+    total = round(subtotal + tax, 2)
+
+    doc = fitz.open()
+    page = doc.new_page(width=612, height=792)
+
+    # --- Header bar (140pt tall) -------------------------------------
+    page.draw_rect(
+        fitz.Rect(0, 0, 612, 140),
+        color=style.primary, fill=style.primary, width=0,
+    )
+    # Logo glyph
+    page.insert_text(
+        (40, 60), style.logo_glyph,
+        fontname="helv", fontsize=34, color=style.text_on_primary,
+    )
+    page.insert_text(
+        (78, 56), style.logo_text,
+        fontname="hebo", fontsize=14, color=style.text_on_primary,
+    )
+    page.insert_text(
+        (78, 74), spec.vendor,
+        fontname="helv", fontsize=10, color=style.text_on_primary,
+    )
+    page.insert_text(
+        (78, 90), spec.vendor_address,
+        fontname="helv", fontsize=8, color=style.text_on_primary,
+    )
+    # Right side: INVOICE label + number (large). Auto-shrink the
+    # invoice-number font when it would otherwise run past the page edge.
+    page.insert_text(
+        (430, 50), "INVOICE",
+        fontname="hebo", fontsize=22, color=style.text_on_primary,
+    )
+    inv_label = f"No. {spec.invoice_number}"
+    inv_fontsize = 12 if len(inv_label) <= 24 else (10 if len(inv_label) <= 30 else 8)
+    page.insert_text(
+        (430, 74), inv_label,
+        fontname="helv", fontsize=inv_fontsize, color=style.text_on_primary,
+    )
+    page.insert_text(
+        (430, 92), f"Issued: {spec.invoice_date}",
+        fontname="helv", fontsize=9, color=style.text_on_primary,
+    )
+    page.insert_text(
+        (430, 106), f"Due: {spec.due_date}",
+        fontname="helv", fontsize=9, color=style.text_on_primary,
+    )
+    # Thin accent stripe under the bar
+    page.draw_rect(
+        fitz.Rect(0, 140, 612, 146),
+        color=style.accent, fill=style.accent, width=0,
+    )
+
+    # --- Meta grid ----------------------------------------------------
+    y = 168
+    meta = [
+        ("Customer PO", spec.po_number),
+        ("Payment terms", spec.terms),
+        ("Currency", spec.currency),
+        ("Tax", spec.tax_label),
+    ]
+    col_x = [40, 190, 340, 470]
+    for (label, val), x in zip(meta, col_x, strict=True):
+        page.insert_text((x, y), label.upper(),
+                         fontname="hebo", fontsize=8, color=style.accent)
+        page.insert_text((x, y + 14), val,
+                         fontname="helv", fontsize=10)
+
+    # --- Bill-to / Ship-to columns -----------------------------------
+    y = 218
+    page.insert_text((40, y), "BILL TO",
+                     fontname="hebo", fontsize=8, color=style.accent)
+    page.insert_text((40, y + 14), spec.bill_to,
+                     fontname="helv", fontsize=10)
+    page.insert_text((320, y), "SHIP TO",
+                     fontname="hebo", fontsize=8, color=style.accent)
+    yy = y + 14
+    for site in spec.ship_to:
+        page.insert_text((320, yy), site, fontname="helv", fontsize=10)
+        yy += 13
+
+    # --- Line items table --------------------------------------------
+    y = max(yy, y + 50) + 20
+    # Column header strip
+    page.draw_rect(
+        fitz.Rect(36, y - 2, 576, y + 18),
+        color=style.primary, fill=style.primary, width=0,
+    )
+    page.insert_text((42, y + 12), "SKU",
+                     fontname="hebo", fontsize=9, color=style.text_on_primary)
+    page.insert_text((110, y + 12), "DESCRIPTION",
+                     fontname="hebo", fontsize=9, color=style.text_on_primary)
+    page.insert_text((380, y + 12), "QTY",
+                     fontname="hebo", fontsize=9, color=style.text_on_primary)
+    page.insert_text((430, y + 12), "UNIT",
+                     fontname="hebo", fontsize=9, color=style.text_on_primary)
+    page.insert_text((510, y + 12), "AMOUNT",
+                     fontname="hebo", fontsize=9, color=style.text_on_primary)
+    y += 22
+
+    for i, li in enumerate(spec.line_items):
+        if i % 2 == 0:
+            page.draw_rect(
+                fitz.Rect(36, y - 2, 576, y + 16),
+                color=style.soft, fill=style.soft, width=0,
+            )
+        page.insert_text((42, y + 11), li.sku,
+                         fontname="helv", fontsize=9, color=style.text_on_soft)
+        page.insert_text((110, y + 11), li.description[:54],
+                         fontname="helv", fontsize=9, color=style.text_on_soft)
+        page.insert_text((380, y + 11), str(li.qty),
+                         fontname="helv", fontsize=9, color=style.text_on_soft)
+        page.insert_text(
+            (430, y + 11),
+            _format_money(li.unit_price, spec.currency_symbol),
+            fontname="helv", fontsize=9, color=style.text_on_soft,
+        )
+        page.insert_text(
+            (510, y + 11),
+            _format_money(li.total, spec.currency_symbol),
+            fontname="helv", fontsize=9, color=style.text_on_soft,
+        )
+        y += 18
+
+    # --- Totals panel -------------------------------------------------
+    y += 12
+    page.insert_text((380, y), "Subtotal",
+                     fontname="helv", fontsize=10)
+    page.insert_text((510, y),
+                     _format_money(subtotal, spec.currency_symbol),
+                     fontname="helv", fontsize=10)
+    y += 16
+    page.insert_text((380, y),
+                     f"{spec.tax_label} ({spec.tax_rate * 100:.1f}%)",
+                     fontname="helv", fontsize=10)
+    page.insert_text((510, y),
+                     _format_money(tax, spec.currency_symbol),
+                     fontname="helv", fontsize=10)
+    y += 12
+    # Filled "TOTAL DUE" band
+    page.draw_rect(
+        fitz.Rect(370, y, 576, y + 26),
+        color=style.primary, fill=style.primary, width=0,
+    )
+    page.insert_text((380, y + 18), "TOTAL DUE",
+                     fontname="hebo", fontsize=12,
+                     color=style.text_on_primary)
+    page.insert_text((480, y + 18),
+                     _format_money(total, spec.currency_symbol),
+                     fontname="hebo", fontsize=12,
+                     color=style.text_on_primary)
+    y += 40
+
+    # --- Payment details footer --------------------------------------
+    if spec.payment_details:
+        page.insert_text((40, y), "PAYMENT DETAILS",
+                         fontname="hebo", fontsize=9, color=style.accent)
+        y += 14
+        for line in spec.payment_details:
+            page.insert_text((40, y), line, fontname="helv", fontsize=9)
+            y += 12
+
+    # --- Notes -------------------------------------------------------
+    if spec.notes:
+        y += 8
+        page.insert_text((40, y), "NOTES",
+                         fontname="hebo", fontsize=9, color=style.accent)
+        y += 14
+        for note in spec.notes:
+            page.insert_text((40, y), f"• {note}",
+                             fontname="helv", fontsize=8)
+            y += 11
+
+    # --- Decorative "QR-style" square --------------------------------
+    qr_size = 56
+    qr_x, qr_y = 510, 720
+    page.draw_rect(
+        fitz.Rect(qr_x, qr_y, qr_x + qr_size, qr_y + qr_size),
+        color=(0, 0, 0), fill=(1, 1, 1), width=1,
+    )
+    # Pseudo-random fill cells (deterministic from invoice number).
+    seed = sum(ord(c) for c in spec.invoice_number)
+    cells = 7
+    cell = qr_size / cells
+    for r in range(cells):
+        for c in range(cells):
+            if ((r * 31 + c * 17 + seed) % 3) == 0:
+                page.draw_rect(
+                    fitz.Rect(
+                        qr_x + c * cell, qr_y + r * cell,
+                        qr_x + (c + 1) * cell, qr_y + (r + 1) * cell,
+                    ),
+                    color=(0, 0, 0), fill=(0, 0, 0), width=0,
+                )
+
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    doc.save(out_path)
+    doc.close()
+
+
+def _totals(spec: InvoiceSpec) -> tuple[float, float, float, float, float, float]:
+    """Returns (lines_subtotal, extras_subtotal, discount, tax, retainage, total)."""
+    lines_subtotal = round(sum(li.total for li in spec.line_items), 2)
+    extras_subtotal = round(
+        sum(li.total for _, items in spec.extra_sections for li in items), 2
+    )
+    pre_tax = round(lines_subtotal + extras_subtotal - spec.discount, 2)
+    tax = round(pre_tax * spec.tax_rate, 2)
+    retainage = round((lines_subtotal + extras_subtotal) * spec.retainage_rate, 2)
+    total = round(pre_tax + tax + spec.shipping - retainage, 2)
+    return lines_subtotal, extras_subtotal, spec.discount, tax, retainage, total
+
+
+def _build_minimal_portrait_pdf(spec: InvoiceSpec, out_path: Path) -> None:
+    """Minimal, editorial portrait layout. Big INVOICE wordmark, lots of white space."""
+    lines_subtotal, _, _, tax, _, total = _totals(spec)
+    doc = fitz.open()
+    page = doc.new_page(width=612, height=792)
+
+    # Thin rule + huge wordmark
+    page.draw_line(fitz.Point(60, 110), fitz.Point(260, 110), color=(0, 0, 0), width=0.7)
+    page.insert_text((300, 130), "INVOICE", fontname="helv", fontsize=36, color=(0, 0, 0))
+
+    # Issued-to / Pay-to block (top-left of body)
+    y = 360
+    page.insert_text((60, y), "ISSUED TO:", fontname="hebo", fontsize=9)
+    page.insert_text((60, y + 14), spec.bill_to, fontname="helv", fontsize=10)
+    y += 50
+    page.insert_text((60, y), "FROM:", fontname="hebo", fontsize=9)
+    page.insert_text((60, y + 14), spec.vendor, fontname="helv", fontsize=10)
+    page.insert_text((60, y + 28), spec.vendor_address, fontname="helv", fontsize=9)
+
+    # Right-side meta
+    page.insert_text((360, 360), "INVOICE NO:", fontname="hebo", fontsize=9)
+    page.insert_text((480, 360), spec.invoice_number, fontname="helv", fontsize=10)
+    page.insert_text((360, 376), "DATE:", fontname="hebo", fontsize=9)
+    page.insert_text((480, 376), spec.invoice_date, fontname="helv", fontsize=10)
+    page.insert_text((360, 392), "DUE DATE:", fontname="hebo", fontsize=9)
+    page.insert_text((480, 392), spec.due_date, fontname="helv", fontsize=10)
+    page.insert_text((360, 408), "TERMS:", fontname="hebo", fontsize=9)
+    page.insert_text((480, 408), spec.terms, fontname="helv", fontsize=10)
+    page.insert_text((360, 424), "PO:", fontname="hebo", fontsize=9)
+    page.insert_text((480, 424), spec.po_number, fontname="helv", fontsize=10)
+
+    # Table
+    y = 470
+    page.insert_text((60, y), "DESCRIPTION", fontname="hebo", fontsize=9)
+    page.insert_text((340, y), "UNIT PRICE", fontname="hebo", fontsize=9)
+    page.insert_text((430, y), "QTY", fontname="hebo", fontsize=9)
+    page.insert_text((510, y), "TOTAL", fontname="hebo", fontsize=9)
+    y += 6
+    page.draw_line(fitz.Point(60, y), fitz.Point(560, y), color=(0.7, 0.7, 0.7))
+    y += 16
+    for li in spec.line_items:
+        page.insert_text((60, y), li.description[:40], fontname="helv", fontsize=10)
+        page.insert_text((340, y), _format_money(li.unit_price, spec.currency_symbol),
+                         fontname="helv", fontsize=10)
+        page.insert_text((430, y), str(li.qty), fontname="helv", fontsize=10)
+        page.insert_text((510, y), _format_money(li.total, spec.currency_symbol),
+                         fontname="helv", fontsize=10)
+        y += 18
+
+    y += 6
+    page.draw_line(fitz.Point(60, y), fitz.Point(560, y), color=(0.7, 0.7, 0.7))
+    y += 16
+    page.insert_text((60, y), "SUBTOTAL", fontname="hebo", fontsize=10)
+    page.insert_text((510, y), _format_money(lines_subtotal, spec.currency_symbol),
+                     fontname="hebo", fontsize=10)
+    y += 16
+    page.insert_text((430, y), f"{spec.tax_label}", fontname="helv", fontsize=10)
+    page.insert_text((510, y), f"{spec.tax_rate * 100:.0f}%", fontname="helv", fontsize=10)
+    y += 16
+    page.insert_text((430, y), "TOTAL", fontname="hebo", fontsize=11)
+    page.insert_text((510, y), _format_money(total, spec.currency_symbol),
+                     fontname="hebo", fontsize=11)
+
+    # Signature
+    if spec.signature_name:
+        page.draw_line(fitz.Point(380, 740), fitz.Point(540, 740), color=(0.4, 0.4, 0.4))
+        page.insert_text((400, 755), spec.signature_name, fontname="helv", fontsize=10)
+
+    # Notes
+    y = 720
+    if spec.notes:
+        page.insert_text((60, y), "Notes:", fontname="hebo", fontsize=8)
+        for note in spec.notes:
+            y += 11
+            page.insert_text((60, y), f"• {note}", fontname="helv", fontsize=8)
+
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    doc.save(out_path)
+    doc.close()
+
+
+def _build_banded_grid_pdf(spec: InvoiceSpec, out_path: Path) -> None:
+    """Dense, multi-section banded grid (architectural-services style)."""
+    lines_subtotal, extras_subtotal, _, tax, retainage, total = _totals(spec)
+    style = spec.showcase or SHOWCASE_AWS
+    doc = fitz.open()
+    page = doc.new_page(width=612, height=792)
+
+    # Top header bar
+    page.draw_rect(fitz.Rect(0, 0, 612, 56), color=style.primary, fill=style.primary, width=0)
+    page.insert_text((40, 24), "FIRM LOGO", fontname="hebo", fontsize=10,
+                     color=style.text_on_primary)
+    page.insert_text((40, 42), spec.vendor, fontname="hebo", fontsize=14,
+                     color=style.text_on_primary)
+    page.insert_text((360, 36), "Professional Services Invoice",
+                     fontname="hebo", fontsize=14, color=style.text_on_primary)
+
+    def band(y: float, label: str) -> float:
+        page.draw_rect(fitz.Rect(0, y, 612, y + 18),
+                       color=style.accent, fill=style.accent, width=0)
+        page.insert_text((40, y + 13), label, fontname="hebo", fontsize=10,
+                         color=(0.10, 0.12, 0.16))
+        return y + 24
+
+    # Vendor / Invoice meta band
+    y = band(70, "FIRM & INVOICE")
+    rows = [
+        ("Firm Address:", spec.vendor_address),
+        ("Invoice Number:", spec.invoice_number),
+        ("Date Issued:", spec.invoice_date),
+        ("Payment Due:", spec.due_date),
+        ("Terms:", spec.terms),
+        ("Customer PO / Project Code:", spec.po_number),
+    ]
+    for label, val in rows:
+        page.insert_text((40, y), label, fontname="hebo", fontsize=9)
+        page.insert_text((220, y), val, fontname="helv", fontsize=9)
+        y += 14
+
+    y = band(y + 4, "FOR")
+    page.insert_text((40, y), "Bill To:", fontname="hebo", fontsize=9)
+    page.insert_text((140, y), spec.bill_to, fontname="helv", fontsize=9)
+    y += 14
+    page.insert_text((40, y), "Project Sites:", fontname="hebo", fontsize=9)
+    yy = y
+    for site in spec.ship_to:
+        page.insert_text((140, yy), site, fontname="helv", fontsize=9)
+        yy += 12
+    y = yy + 4
+
+    def render_section(title: str, items: list[LineItem], y: float) -> float:
+        y = band(y, title.upper())
+        page.insert_text((40, y), "Description", fontname="hebo", fontsize=9)
+        page.insert_text((320, y), "Phase / Qty", fontname="hebo", fontsize=9)
+        page.insert_text((420, y), "Unit / Hours", fontname="hebo", fontsize=9)
+        page.insert_text((510, y), "Amount", fontname="hebo", fontsize=9)
+        y += 14
+        for li in items:
+            page.insert_text((40, y), li.description[:50], fontname="helv", fontsize=9)
+            page.insert_text((320, y), li.sku, fontname="helv", fontsize=9)
+            page.insert_text((420, y), str(li.qty), fontname="helv", fontsize=9)
+            page.insert_text((510, y), _format_money(li.total, spec.currency_symbol),
+                             fontname="helv", fontsize=9)
+            y += 12
+        page.insert_text((420, y), "Subtotal:", fontname="hebo", fontsize=9)
+        page.insert_text((510, y),
+                         _format_money(round(sum(i.total for i in items), 2),
+                                       spec.currency_symbol),
+                         fontname="hebo", fontsize=9)
+        return y + 16
+
+    y = render_section("Services", spec.line_items, y)
+    for title, items in spec.extra_sections:
+        y = render_section(title, items, y)
+
+    # Summary band
+    y = band(y, "SUMMARY")
+    summary_rows: list[tuple[str, str]] = [
+        ("Services + extras subtotal",
+         _format_money(lines_subtotal + extras_subtotal, spec.currency_symbol)),
+    ]
+    if spec.discount:
+        summary_rows.append((f"{spec.discount_label}",
+                             "-" + _format_money(spec.discount, spec.currency_symbol)))
+    summary_rows.append(
+        (f"{spec.tax_label} ({spec.tax_rate * 100:.2f}%)",
+         _format_money(tax, spec.currency_symbol))
+    )
+    if spec.retainage_rate:
+        summary_rows.append(
+            (f"Retainage ({spec.retainage_rate * 100:.2f}%) — held back",
+             "-" + _format_money(retainage, spec.currency_symbol))
+        )
+    for label, val in summary_rows:
+        page.insert_text((40, y), label, fontname="helv", fontsize=9)
+        page.insert_text((510, y), val, fontname="helv", fontsize=9)
+        y += 14
+    # Total bar
+    page.draw_rect(fitz.Rect(36, y, 576, y + 22),
+                   color=style.primary, fill=style.primary, width=0)
+    page.insert_text((40, y + 16), "TOTAL DUE THIS INVOICE",
+                     fontname="hebo", fontsize=11, color=style.text_on_primary)
+    page.insert_text((480, y + 16), _format_money(total, spec.currency_symbol),
+                     fontname="hebo", fontsize=12, color=style.text_on_primary)
+    y += 32
+
+    if spec.payment_details:
+        page.insert_text((40, y), "PAYMENT DETAILS:", fontname="hebo", fontsize=9)
+        y += 12
+        for line in spec.payment_details:
+            page.insert_text((40, y), line, fontname="helv", fontsize=8)
+            y += 11
+
+    if spec.notes:
+        y += 6
+        page.insert_text((40, y), "NOTES:", fontname="hebo", fontsize=9)
+        y += 12
+        for note in spec.notes:
+            page.insert_text((40, y), f"• {note}", fontname="helv", fontsize=8)
+            y += 11
+
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    doc.save(out_path)
+    doc.close()
+
+
+def _build_landscape_panorama_pdf(spec: InvoiceSpec, out_path: Path) -> None:
+    """Horizontal (landscape) layout — boxed meta top-right, two-col parties."""
+    lines_subtotal, _, _, tax, _, total = _totals(spec)
+    style = spec.showcase or SHOWCASE_STRIPE
+    doc = fitz.open()
+    # Landscape US Letter
+    page = doc.new_page(width=792, height=612)
+
+    # Title (left) + boxed meta (right)
+    page.insert_text((40, 60), "Invoice", fontname="hebo", fontsize=26)
+    page.insert_text((40, 82), spec.vendor, fontname="hebo", fontsize=12,
+                     color=style.primary)
+
+    # Boxed meta grid (top right) — 2 columns × 4 rows
+    box_x, box_y = 520, 40
+    box_w, box_h = 232, 22
+    meta_pairs = [
+        ("Invoice Date", spec.invoice_date),
+        ("Payment Due Date", spec.due_date),
+        ("Customer ID / PO", spec.po_number),
+        ("Invoice Number", spec.invoice_number),
+    ]
+    for i, (label, val) in enumerate(meta_pairs):
+        ry = box_y + i * box_h
+        # Label cell (dark)
+        page.draw_rect(fitz.Rect(box_x, ry, box_x + 110, ry + box_h),
+                       color=style.primary, fill=style.primary, width=0)
+        page.insert_text((box_x + 6, ry + 15), label,
+                         fontname="hebo", fontsize=9, color=style.text_on_primary)
+        # Value cell (light)
+        page.draw_rect(fitz.Rect(box_x + 110, ry, box_x + box_w, ry + box_h),
+                       color=(0.95, 0.95, 0.95), fill=(0.95, 0.95, 0.95), width=0)
+        page.insert_text((box_x + 116, ry + 15), val, fontname="helv", fontsize=9)
+
+    # Two-column parties
+    y = 170
+    page.insert_text((40, y), "Product / Service Provider",
+                     fontname="hebo", fontsize=11, color=style.primary)
+    page.insert_text((40, y + 16), spec.vendor, fontname="hebo", fontsize=10)
+    page.insert_text((40, y + 30), spec.vendor_address, fontname="helv", fontsize=9)
+
+    page.insert_text((400, y), "Client",
+                     fontname="hebo", fontsize=11, color=style.primary)
+    page.insert_text((400, y + 16), spec.bill_to, fontname="helv", fontsize=10)
+    yy = y + 30
+    for site in spec.ship_to:
+        page.insert_text((400, yy), site, fontname="helv", fontsize=9)
+        yy += 12
+
+    # Line-item table (centered band)
+    y = 270
+    page.draw_rect(fitz.Rect(40, y, 752, y + 20),
+                   color=style.primary, fill=style.primary, width=0)
+    page.insert_text((360, y + 14), "Product / Service Details",
+                     fontname="hebo", fontsize=10, color=style.text_on_primary)
+    y += 20
+    headers = [("Item/Service", 50), ("Description", 170),
+               ("Quantity / Hours", 380), ("Unit Price / Rate", 510), ("Line Total", 660)]
+    page.draw_rect(fitz.Rect(40, y, 752, y + 18),
+                   color=(0.92, 0.94, 0.98), fill=(0.92, 0.94, 0.98), width=0)
+    for label, x in headers:
+        page.insert_text((x, y + 13), label, fontname="hebo", fontsize=9)
+    y += 20
+    for li in spec.line_items:
+        page.insert_text((50, y), li.sku[:18], fontname="helv", fontsize=9)
+        page.insert_text((170, y), li.description[:32], fontname="helv", fontsize=9)
+        page.insert_text((380, y), str(li.qty), fontname="helv", fontsize=9)
+        page.insert_text((510, y), _format_money(li.unit_price, spec.currency_symbol),
+                         fontname="helv", fontsize=9)
+        page.insert_text((660, y), _format_money(li.total, spec.currency_symbol),
+                         fontname="helv", fontsize=9)
+        y += 14
+
+    # Totals box (right)
+    tx, ty, tw = 560, 470, 192
+    rows: list[tuple[str, str]] = [
+        ("Subtotal", _format_money(lines_subtotal, spec.currency_symbol)),
+    ]
+    if spec.discount:
+        rows.append((spec.discount_label,
+                     "-" + _format_money(spec.discount, spec.currency_symbol)))
+    rows.append((f"{spec.tax_label} ({spec.tax_rate * 100:.1f}%)",
+                 _format_money(tax, spec.currency_symbol)))
+    if spec.shipping:
+        rows.append(("Shipping Cost", _format_money(spec.shipping, spec.currency_symbol)))
+    for i, (label, val) in enumerate(rows):
+        ry = ty + i * 20
+        page.draw_rect(fitz.Rect(tx, ry, tx + tw, ry + 20),
+                       color=(0.95, 0.95, 0.95), fill=(0.95, 0.95, 0.95), width=0)
+        page.insert_text((tx + 6, ry + 14), label, fontname="hebo", fontsize=9)
+        page.insert_text((tx + 130, ry + 14), val, fontname="helv", fontsize=9)
+    ry = ty + len(rows) * 20
+    page.draw_rect(fitz.Rect(tx, ry, tx + tw, ry + 22),
+                   color=style.primary, fill=style.primary, width=0)
+    page.insert_text((tx + 6, ry + 16), "Grand Total",
+                     fontname="hebo", fontsize=10, color=style.text_on_primary)
+    page.insert_text((tx + 130, ry + 16),
+                     _format_money(total, spec.currency_symbol),
+                     fontname="hebo", fontsize=10, color=style.text_on_primary)
+
+    # Notes / payment (left)
+    y = 470
+    if spec.payment_details:
+        page.insert_text((40, y), "Payment Details", fontname="hebo", fontsize=10,
+                         color=style.primary)
+        y += 14
+        for line in spec.payment_details:
+            page.insert_text((40, y), line, fontname="helv", fontsize=9)
+            y += 11
+    if spec.notes:
+        y += 4
+        page.insert_text((40, y), "Notes", fontname="hebo", fontsize=10,
+                         color=style.primary)
+        y += 14
+        for note in spec.notes:
+            page.insert_text((40, y), f"• {note}", fontname="helv", fontsize=9)
+            y += 11
+
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    doc.save(out_path)
+    doc.close()
+
+
 def _build_pdf(spec: InvoiceSpec, out_path: Path) -> None:
     out_path.parent.mkdir(parents=True, exist_ok=True)
+
+    if spec.image_mode == "showcase":
+        _build_showcase_pdf(spec, out_path)
+        return
+    if spec.image_mode == "minimal_portrait":
+        _build_minimal_portrait_pdf(spec, out_path)
+        return
+    if spec.image_mode == "banded_grid":
+        _build_banded_grid_pdf(spec, out_path)
+        return
+    if spec.image_mode == "landscape_panorama":
+        _build_landscape_panorama_pdf(spec, out_path)
+        return
 
     if spec.image_mode == "scan_page":
         # Whole page is a single image; PDF text is intentionally near-empty.
@@ -920,6 +1568,584 @@ SPECS: list[InvoiceSpec] = [
         ),
         sent_at="2026-05-01T11:15:00-04:00",
         header=HEADER_EMERALD,
+    ),
+    # =====================================================================
+    # SHOWCASE CASES — polished, real-template-inspired layouts.
+    # These exercise the agent on invoices that look like ones an AP team
+    # would actually receive in 2026: SaaS subscription billing, cloud
+    # services usage bills, freelance creative work, and B2B telecom.
+    # =====================================================================
+
+    # -------------------------------------------------------------------
+    # case_15: SaaS subscription invoice — Stripe / Linear / Vercel-style.
+    # Indigo header bar, zebra rows, decorative QR square, full payment
+    # details footer (ACH + card-on-file). Clean, legitimate.
+    # -------------------------------------------------------------------
+    InvoiceSpec(
+        case_dir="case_15_saas_subscription",
+        vendor="Lattice Billing, Inc.",
+        vendor_address="548 Market St #34267, San Francisco, CA 94104 · EIN 88-2049173",
+        invoice_number="LTC-2026-SUB-014872",
+        invoice_date="2026-05-01",
+        due_date="2026-05-15",
+        terms="Net 14 (auto-charged to card on file)",
+        currency="USD",
+        currency_symbol="$",
+        po_number="HELIX-PO-2026-0044",
+        bill_to="Helix Analytics, Inc., 222 Kearny St, Floor 7, San Francisco, CA 94108",
+        ship_to=["Helix Analytics — digital delivery (no physical shipment)"],
+        line_items=[
+            LineItem("PLAN-GROWTH", "Growth plan — 25 seats × monthly", 25, 49.00),
+            LineItem("ADDON-SSO",   "SAML SSO add-on (Enterprise)",       1, 199.00),
+            LineItem("ADDON-AUDIT", "Audit-log retention (12 months)",    1, 149.00),
+            LineItem("USAGE-API",   "API calls overage — 1.2M @ $0.0008", 1200, 0.80),
+            LineItem("CREDIT-RFR",  "Referral credit (applied)",          1, -100.00),
+        ],
+        tax_rate=0.0875,
+        tax_label="CA sales tax",
+        notes=[
+            "Billing cycle: 2026-05-01 → 2026-05-31.",
+            "Card on file ending •••• 4242 will be auto-charged on the due date.",
+            "Manage seats and billing at https://billing.lattice.example/helix.",
+        ],
+        email_subject="Your Lattice invoice for May 2026 — LTC-2026-SUB-014872",
+        email_from_name="Lattice Billing",
+        email_from_addr="invoices@latticebilling.example",
+        email_body=(
+            "Hi Helix Analytics team,\n\n"
+            "Your invoice for the May 2026 billing cycle is attached. The "
+            "primary card on file ending in 4242 will be auto-charged on "
+            "2026-05-15 unless you raise an issue beforehand.\n\n"
+            "Summary:\n"
+            "  • Growth plan — 25 seats\n"
+            "  • SAML SSO add-on + 12-month audit retention\n"
+            "  • Metered API usage — 1.2M calls (overage)\n"
+            "  • Referral credit applied (-$100.00)\n\n"
+            "Manage seats, change billing contact, or download prior "
+            "invoices at https://billing.lattice.example/helix.\n\n"
+            "Questions? Reply to this email and our billing team will get "
+            "back within one business day.\n\n"
+            "— Lattice Billing\n"
+            "PO Box 34267, San Francisco, CA 94104 · +1 (415) 555-0188"
+        ),
+        sent_at="2026-05-01T07:00:00-07:00",
+        image_mode="showcase",
+        showcase=SHOWCASE_STRIPE,
+        payment_details=[
+            "Card on file: Visa •••• 4242 (expires 11/28). Auto-charged on due date.",
+            "ACH (US): Routing 121000248 · Account 0098123456 · Wells Fargo Bank",
+            "Wire (international): SWIFT WFBIUS6S · Beneficiary Lattice Billing, Inc.",
+            "Reference the invoice number on all transfers.",
+        ],
+    ),
+    # -------------------------------------------------------------------
+    # case_16: Cloud-services usage bill — AWS / Azure / GCP-style.
+    # Many small-unit line items, deep slate-blue header with orange
+    # accent, currency USD, mid-month statement window.
+    # -------------------------------------------------------------------
+    InvoiceSpec(
+        case_dir="case_16_cloud_services_bill",
+        vendor="Nimbus Cloud Services, LLC",
+        vendor_address="410 Terry Ave N, Seattle, WA 98109 · EIN 47-6611228",
+        invoice_number="NCS-2026-04-USAGE-7728190",
+        invoice_date="2026-05-02",
+        due_date="2026-05-17",
+        terms="Net 15 (consolidated billing)",
+        currency="USD",
+        currency_symbol="$",
+        po_number="ORION-AWS-PO-2026-Q2",
+        bill_to="Orion Robotics, Inc., 1700 Westlake Ave N, Seattle, WA 98109",
+        ship_to=["Orion Robotics — cloud account 4471-9920-5532 (digital)"],
+        line_items=[
+            LineItem("EC2-M6I-XL",  "Compute m6i.xlarge — 730 hrs × 12 inst.", 8760, 0.192),
+            LineItem("S3-STD",      "Object storage — 42.7 TB @ $0.023/GB",  43700, 0.023),
+            LineItem("EGRESS-NA",   "Data egress to internet (NA) — 6.2 TB",   6200, 0.090),
+            LineItem("RDS-PG-L",    "Managed PostgreSQL db.r6g.large — 730h",   730, 0.260),
+            LineItem("LAMBDA-INV",  "Function invocations — 482M @ $0.20/M",    482, 0.20),
+            LineItem("CDN-REQ",     "CDN HTTPS requests — 198M @ $0.01/10k",  19800, 0.01),
+            LineItem("SUPPORT-BIZ", "Business support tier — monthly minimum",     1, 100.00),
+            LineItem("CREDIT-EDP",  "Enterprise discount program credit",          1, -245.00),
+        ],
+        tax_rate=0.101,
+        tax_label="WA combined sales tax",
+        notes=[
+            "Statement period: 2026-04-01 → 2026-04-30.",
+            "Reserved-instance coverage: 78%. Consider extending RI coverage.",
+            "Account: 4471-9920-5532 · Region: us-west-2 (primary), us-east-1 (DR).",
+            "Anomaly: egress +38% vs. prior month — investigate noisy job.",
+        ],
+        email_subject="Nimbus Cloud Services — April 2026 usage statement (account 4471-9920-5532)",
+        email_from_name="Nimbus Cloud Billing",
+        email_from_addr="billing-noreply@nimbuscloud.example",
+        email_body=(
+            "Hello Orion Cloud Operations,\n\n"
+            "Your consolidated April 2026 usage statement is attached for "
+            "account 4471-9920-5532 (statement window 2026-04-01 to "
+            "2026-04-30). Payment is due 2026-05-17 (Net 15).\n\n"
+            "Notable items this cycle:\n"
+            "  • Compute and storage tracking within budget.\n"
+            "  • Data egress is +38% month-over-month — most likely the new "
+            "    nightly export job; please review.\n"
+            "  • Enterprise Discount Program credit applied (-$245.00).\n\n"
+            "Detailed CSV line-item export is available in the billing "
+            "console: https://console.nimbuscloud.example/billing/orion.\n\n"
+            "For volume-pricing questions, reach out to your account "
+            "manager Priscilla Chen (priscilla.chen@nimbuscloud.example).\n\n"
+            "— Nimbus Cloud Services Billing"
+        ),
+        sent_at="2026-05-02T03:14:00-07:00",
+        image_mode="showcase",
+        showcase=SHOWCASE_AWS,
+        payment_details=[
+            "ACH (US):  Routing 026009593 · Account 4471-9920-5532-AR · Bank of America",
+            "Wire (USD): SWIFT BOFAUS3N · Beneficiary Nimbus Cloud Services, LLC",
+            "Pay online: https://console.nimbuscloud.example/billing/pay",
+            "Always include the invoice number in the payment reference.",
+        ],
+    ),
+    # -------------------------------------------------------------------
+    # case_17: Freelance designer invoice — Wave / HelloBonsai-style.
+    # Editorial near-black header, coral accent, services-only with hourly
+    # and project-fee mix, EUR currency, sole-trader VAT note.
+    # -------------------------------------------------------------------
+    InvoiceSpec(
+        case_dir="case_17_freelance_designer",
+        vendor="Maya Okonkwo — Design Studio (sole trader)",
+        vendor_address="Prinsengracht 263, 1016 GV Amsterdam, NL · BTW NL003456789B01",
+        invoice_number="MO-2026-0419",
+        invoice_date="2026-04-19",
+        due_date="2026-05-19",
+        terms="Net 30",
+        currency="EUR",
+        currency_symbol="€",
+        po_number="CAVA-PO-BRAND-26-014",
+        bill_to="Cava Foods Europe B.V., Herengracht 458, 1017 CA Amsterdam, NL",
+        ship_to=["Cava Foods Europe — digital delivery (Figma + assets via Frame.io)"],
+        line_items=[
+            LineItem("BRAND-DISC",  "Brand discovery workshop (2 sessions)",     2, 950.00),
+            LineItem("LOGO-EXPL",   "Logo exploration — 3 directions",           1, 2400.00),
+            LineItem("LOGO-REFINE", "Logo refinement + master files",            1, 1600.00),
+            LineItem("DESIGN-HRS",  "Senior design hours @ €145/hr (Apr 2026)", 42, 145.00),
+            LineItem("PRINT-SPEC",  "Print-production spec sheet",               1, 380.00),
+            LineItem("LIC-USAGE",   "Asset usage license — EU, 3 years",         1, 1200.00),
+        ],
+        tax_rate=0.21,
+        tax_label="NL BTW",
+        notes=[
+            "Project: Cava Foods Europe — 2026 brand refresh, Phase 1.",
+            "Source files delivered via Figma share-link (read-only).",
+            "Hourly rate confirmed in SOW dated 2026-02-11.",
+            "Asset usage license: European market, 3 years from delivery.",
+        ],
+        email_subject="Cava brand refresh — April invoice (Phase 1, MO-2026-0419)",
+        email_from_name="Maya Okonkwo",
+        email_from_addr="maya@okonkwo-studio.example",
+        email_body=(
+            "Hi Anke and Cava AP,\n\n"
+            "Attached is the April 2026 invoice for the Cava Foods Europe "
+            "brand refresh (Phase 1) under PO CAVA-PO-BRAND-26-014. It "
+            "covers the discovery workshop, three logo directions, the "
+            "refined master files, 42 senior design hours for April, the "
+            "print-production spec sheet, and the EU 3-year asset usage "
+            "license per our SOW dated 11 Feb 2026.\n\n"
+            "BTW is charged at the standard NL rate (21%). Net 30 terms; "
+            "preferred payment is SEPA — IBAN in the footer of the PDF.\n\n"
+            "Phase 2 (packaging system) kicks off the week of 12 May; I'll "
+            "send the updated SOW separately.\n\n"
+            "Warm regards,\n"
+            "Maya Okonkwo · Design Studio · Amsterdam\n"
+            "+31 6 5544 0192 · maya@okonkwo-studio.example"
+        ),
+        sent_at="2026-04-19T16:42:00+02:00",
+        image_mode="showcase",
+        showcase=SHOWCASE_DESIGNER,
+        payment_details=[
+            "SEPA: IBAN NL91 ABNA 0417 1643 00 · BIC ABNANL2A · ABN AMRO",
+            "Beneficiary: Maya Okonkwo (sole trader) · KvK 78901234",
+            "Please reference invoice MO-2026-0419 on the transfer.",
+            "Late payments accrue statutory interest after 30 days (NL law).",
+        ],
+    ),
+    # -------------------------------------------------------------------
+    # case_18: B2B telecom enterprise invoice. Teal palette, mixed
+    # recurring + one-off + credit lines, GBP currency, multiple cost
+    # centres referenced in email body.
+    # -------------------------------------------------------------------
+    InvoiceSpec(
+        case_dir="case_18_telecom_enterprise",
+        vendor="Vanta Telecom Enterprise Plc",
+        vendor_address="200 Aldersgate, London EC1A 4HD, UK · VAT GB 432 198 765",
+        invoice_number="VTE-2026-04-ENT-9921",
+        invoice_date="2026-05-01",
+        due_date="2026-06-15",
+        terms="Net 45 (enterprise SLA)",
+        currency="GBP",
+        currency_symbol="£",
+        po_number="MERIDIAN-TELCO-PO-2026-7",
+        bill_to="Meridian Insurance Group plc, 30 Fenchurch St, London EC3M 3BD, UK",
+        ship_to=[
+            "Meridian — London HQ (30 Fenchurch St)",
+            "Meridian — Edinburgh Ops (15 St Andrew Sq, EH2 2AY)",
+            "Meridian — Manchester Contact Centre (45 Spinningfields, M3 3AP)",
+        ],
+        line_items=[
+            LineItem("LINE-SIP-100",  "SIP trunk — 100 channels (monthly)",   1, 1850.00),
+            LineItem("MPLS-1G-UK",    "MPLS 1 Gbps managed circuit × 3 sites", 3, 1240.00),
+            LineItem("MOBILE-CORP",   "Corporate mobile plan — 480 lines",   480, 12.50),
+            LineItem("MOBILE-DATA",   "Mobile data pool overage — 318 GB",   318, 4.20),
+            LineItem("CONF-BRIDGE",   "Conference bridge service (monthly)",   1, 220.00),
+            LineItem("4G-FAILOVER",   "4G failover routers — managed (12)",   12, 38.00),
+            LineItem("SLA-CREDIT",    "SLA breach credit (Edinburgh, 28 Apr)", 1, -415.00),
+        ],
+        tax_rate=0.20,
+        tax_label="UK VAT",
+        notes=[
+            "Service period: April 2026.",
+            "SLA breach credit applied for the Edinburgh circuit outage on 2026-04-28 (4h 12m). Incident INC-2026-04-118.",
+            "Mobile pool: 2 TB monthly; April pool consumption 2,318 GB.",
+            "Next contract review window opens 2026-09-01.",
+        ],
+        email_subject="Vanta Telecom — April 2026 enterprise invoice (with SLA credit)",
+        email_from_name="Olivia Reeves",
+        email_from_addr="olivia.reeves@vantatelecom.example",
+        email_body=(
+            "Hi Meridian AP and Procurement,\n\n"
+            "Please find attached the April 2026 enterprise invoice "
+            "(VTE-2026-04-ENT-9921) under PO MERIDIAN-TELCO-PO-2026-7. "
+            "Terms remain Net 45 per the enterprise SLA contract.\n\n"
+            "Highlights:\n"
+            "  • SIP / MPLS / mobile / conference all on the usual run-rate.\n"
+            "  • SLA breach credit of £415.00 applied for the Edinburgh "
+            "    circuit outage on 28 April 2026 (incident INC-2026-04-118 "
+            "    — 4h 12m hard down). Root-cause report attached separately.\n"
+            "  • Mobile data pool overage of 318 GB — the bulk came from "
+            "    the Manchester contact centre rollout. Suggest revisiting "
+            "    pool sizing at the next review window.\n\n"
+            "Cost-centre allocation per the master agreement:\n"
+            "  - LDN-HQ-CORE-001   55%\n"
+            "  - EDI-OPS-204       25%\n"
+            "  - MAN-CC-330        20%\n\n"
+            "If anything looks off, reply-all and I will loop in your "
+            "service-delivery manager Tom Bryant.\n\n"
+            "Kind regards,\n"
+            "Olivia Reeves · Enterprise Billing · Vanta Telecom\n"
+            "+44 20 7946 0815 · olivia.reeves@vantatelecom.example"
+        ),
+        sent_at="2026-05-01T08:35:00+01:00",
+        image_mode="showcase",
+        showcase=SHOWCASE_TELCO,
+        payment_details=[
+            "BACS: Sort 20-00-00 · Account 87654321 · Barclays Bank Plc",
+            "IBAN: GB29 BARC 2000 0087 6543 21 · BIC BARCGB22",
+            "Beneficiary: Vanta Telecom Enterprise Plc",
+            "Quote VTE-2026-04-ENT-9921 in the payment reference.",
+        ],
+    ),
+    # ----- new layout / style cases (19-23) -------------------------------
+    InvoiceSpec(
+        case_dir="case_19_minimal_portrait",
+        vendor="Thynk Unlimited Studio",
+        vendor_address="123 Anywhere St., Any City · hello@thynkunlimited.example",
+        invoice_number="THYNK-01234",
+        invoice_date="2030-12-05",
+        due_date="2031-01-04",
+        terms="Net 30",
+        currency="USD",
+        currency_symbol="$",
+        po_number="RS-PO-2030-019",
+        bill_to="Richard Sanchez · 123 Anywhere St., Any City",
+        ship_to=["Services delivered remotely (no shipment)"],
+        line_items=[
+            LineItem("BR-CONS",  "Brand consultation",   1, 100.00),
+            LineItem("LOGO",     "Logo design",          1, 100.00),
+            LineItem("WEB",      "Website design",       1, 100.00),
+            LineItem("SMM-TPL",  "Social media templates", 1, 100.00),
+            LineItem("PHOTO",    "Brand photography",    1, 100.00),
+            LineItem("BR-GUIDE", "Brand guide",          1, 100.00),
+        ],
+        tax_rate=0.10,
+        tax_label="Tax",
+        notes=[
+            "Payment by bank transfer or check. Make checks payable to Thynk Unlimited.",
+        ],
+        email_subject="Thynk Unlimited — invoice 01234 (brand identity package)",
+        email_from_name="Faisal Mart",
+        email_from_addr="faisal.mart@thynkunlimited.example",
+        email_body=(
+            "Hi Richard,\n\n"
+            "Attached is invoice 01234 covering the brand identity package "
+            "we wrapped up this week (consultation, logo, website, social "
+            "templates, photography and brand guide). Net 30, due "
+            "04 January 2031.\n\n"
+            "Bank transfer details are on the invoice; reply with the "
+            "transfer confirmation when sent and I'll mark it paid.\n\n"
+            "Thanks again for the trust!\n"
+            "Faisal · Thynk Unlimited"
+        ),
+        sent_at="2030-12-05T16:40:00-05:00",
+        image_mode="minimal_portrait",
+        signature_name="Faisal Mart",
+    ),
+    InvoiceSpec(
+        case_dir="case_20_architectural_banded",
+        vendor="Northgate Studio Architecture",
+        vendor_address="2217 Kelly Ave N, Seattle, WA 98000 · WA License #54321",
+        invoice_number="NSA-2025-004",
+        invoice_date="2025-03-01",
+        due_date="2025-03-31",
+        terms="Net 30",
+        currency="USD",
+        currency_symbol="$",
+        po_number="GR-RW-25",
+        bill_to=(
+            "Greenwood Development LLC · Sarah Goodwin · "
+            "Greenwood Rowhomes · 411 N Joy St, Seattle, WA 98000"
+        ),
+        ship_to=[
+            "Greenwood Rowhomes — Site A (Lots 1-6)",
+            "Greenwood Rowhomes — Site B (Lots 7-12)",
+        ],
+        line_items=[
+            LineItem("SD",  "Schematic Design — completed Jan 2025",      1, 20000.00),
+            LineItem("DD",  "Design Development — completed Feb 2025",    1, 25000.00),
+            LineItem("CD",  "Construction Documents — in progress",        1, 30000.00),
+            LineItem("CA",  "Construction Administration — pending",       1, 15000.00),
+            LineItem("CO1", "Change Order #1: added patio layout (Feb 20)", 1, 3500.00),
+        ],
+        extra_sections=[
+            (
+                "Reimbursable Expenses",
+                [
+                    LineItem("REIMB-PRINT", "Printing (11x17 drawings)", 1, 150.00),
+                    LineItem("REIMB-MILE",  "Site visit mileage",         1, 75.00),
+                ],
+            ),
+        ],
+        tax_rate=0.1010,
+        tax_label="WA State + King County tax",
+        retainage_rate=0.05,
+        notes=[
+            "Payment Terms: Net 30 days.",
+            "Accepted Payment Methods: bank transfer, check, e-payment link.",
+            "Final payment due upon substantial completion.",
+            "Retainage of 5% will be released after Certificate of Occupancy.",
+        ],
+        email_subject="Northgate Studio — March 2025 invoice for Greenwood Rowhomes",
+        email_from_name="Elena Park, AIA",
+        email_from_addr="elena.park@northgatestudio.example",
+        email_body=(
+            "Hi Sarah,\n\n"
+            "Attached is our March 2025 progress invoice for Greenwood "
+            "Rowhomes (project GR-RW-25). It covers SD + DD billed at "
+            "100%, CD billed at 100% of phase fee (in progress), CA held "
+            "for next phase, plus Change Order #1 (patio layout, approved "
+            "Feb 20).\n\n"
+            "Reimbursables: large-format prints and one site visit. "
+            "Retainage of 5% is held back per contract and will be "
+            "released at substantial completion.\n\n"
+            "Net 30 — due 31 March 2025. Reply if you'd like a separate "
+            "breakdown for the lender draw package.\n\n"
+            "Thanks,\n"
+            "Elena Park, AIA · Northgate Studio Architecture\n"
+            "(206) 555-0123 · info@northgatestudio.example"
+        ),
+        sent_at="2025-03-01T10:00:00-08:00",
+        image_mode="banded_grid",
+        showcase=ShowcaseStyle(
+            primary=(0.07, 0.18, 0.32),
+            accent=(0.95, 0.83, 0.42),
+            soft=(0.96, 0.96, 0.96),
+        ),
+        payment_details=[
+            "Wire: First Interstate Bank · Routing 125000024 · Acct 9988776655",
+            "Beneficiary: Northgate Studio Architecture LLC",
+            "Reference: NSA-2025-004 / GR-RW-25",
+        ],
+    ),
+    InvoiceSpec(
+        case_dir="case_21_landscape_panorama",
+        vendor="Acme Solutions LLC",
+        vendor_address="123 Innovation Drive, Austin, TX 73301 · sara@acme.solutions.example",
+        invoice_number="INV-1047",
+        invoice_date="2025-08-25",
+        due_date="2025-09-08",
+        terms="Net 14 (Due in 2 weeks)",
+        currency="USD",
+        currency_symbol="$",
+        po_number="CUST-4589",
+        bill_to=(
+            "Brightwave Inc · Michael Lee · 456 Market Street, "
+            "Dallas, TX 75201 · michael.lee@example.com"
+        ),
+        ship_to=[
+            "Brightwave Inc — Dallas HQ (456 Market Street)",
+            "Brightwave Inc — Plano Annex (1200 Legacy Dr)",
+        ],
+        line_items=[
+            LineItem("LAPTOP",   "15-inch business laptop, Model X200",   2, 950.00),
+            LineItem("CHAIR",    "Ergonomic swivel chair, Model C300",    4, 180.00),
+            LineItem("CONSULT",  "IT system setup and optimization (5h)", 5, 100.00),
+            LineItem("TRAINING", "Staff training session (3h)",            3, 75.00),
+        ],
+        tax_rate=0.0747,    # ~ $250 on $3,345 subtotal — matches the source-style mock
+        tax_label="State + local sales tax",
+        discount=100.00,
+        discount_label="Volume discount",
+        shipping=50.00,
+        notes=[
+            "Hardware ships within 3 business days; consulting begins after kickoff call.",
+            "Training session can be split across two half-days on request.",
+        ],
+        email_subject="Acme Solutions — invoice INV-1047 (laptops, chairs, IT setup, training)",
+        email_from_name="Sarah Johnson",
+        email_from_addr="sara@acme.solutions.example",
+        email_body=(
+            "Hi Michael,\n\n"
+            "Attached is invoice INV-1047 for the equipment + services "
+            "package we agreed under PO CUST-4589:\n\n"
+            "  • 2 × business laptops (Model X200)\n"
+            "  • 4 × ergonomic chairs (Model C300)\n"
+            "  • 5 hours IT system setup & optimization\n"
+            "  • 3 hours staff training\n\n"
+            "Volume discount applied ($100). Tax and shipping itemised "
+            "separately. Net 14 — due 08 September 2025.\n\n"
+            "Hardware will ship within three business days; I'll send "
+            "tracking once it leaves the warehouse.\n\n"
+            "Best,\n"
+            "Sarah Johnson · Acme Solutions LLC · (555) 555-5555"
+        ),
+        sent_at="2025-08-25T09:15:00-05:00",
+        image_mode="landscape_panorama",
+        showcase=ShowcaseStyle(
+            primary=(0.12, 0.20, 0.36),
+            accent=(0.30, 0.55, 0.85),
+            soft=(0.95, 0.96, 0.99),
+        ),
+        payment_details=[
+            "ACH: Routing 111000025 · Account 555-666-7777 · Frost Bank",
+            "Reference invoice INV-1047 in the wire memo.",
+        ],
+    ),
+    InvoiceSpec(
+        case_dir="case_22_freelance_compact",
+        vendor="ABC Studio Design",
+        vendor_address="123 Freelance Drive, NYC 12345 · contact@abcstudiodesign.example",
+        invoice_number="INV-001",
+        invoice_date="2028-10-16",
+        due_date="2028-10-16",
+        terms="Due on Receipt",
+        currency="USD",
+        currency_symbol="$",
+        po_number="JOHN-DOE-VERBAL-AGREEMENT",
+        bill_to=(
+            "John Doe · ABC Company · 456 Client Lane, NYC 12345 · "
+            "john.doe@client.example"
+        ),
+        ship_to=["Deliverables emailed (no physical shipment)"],
+        line_items=[
+            LineItem("WEB-DEV", "Website Design and Development (10h @ $50)", 10, 50.00),
+            LineItem("LOGO-DSGN", "Logo Design (5h @ $40)",                    5, 40.00),
+            LineItem("CONTENT",  "Content Writing (12h @ $30)",               12, 30.00),
+        ],
+        tax_rate=0.0,
+        tax_label="No tax (sole proprietor, services only)",
+        notes=[
+            "Please make payment via PayPal (wiz@abcstudiodesign.example) "
+            "or bank transfer. Thank you for choosing ABC Studio Design!",
+        ],
+        email_subject="ABC Studio Design — invoice INV-001 (website + logo + content)",
+        email_from_name="Alex B. Carter",
+        email_from_addr="contact@abcstudiodesign.example",
+        email_body=(
+            "Hi John,\n\n"
+            "Thanks again for the project! Attached is invoice INV-001 "
+            "covering everything we agreed:\n\n"
+            "  • Website design + dev — 10 hours\n"
+            "  • Logo design — 5 hours\n"
+            "  • Content writing — 12 hours\n\n"
+            "Total $1,520 — Due on Receipt. Easiest payment is PayPal "
+            "to wiz@abcstudiodesign.example, but bank details are on "
+            "the invoice if you prefer ACH.\n\n"
+            "Let me know once you've sent it and I'll fire over the "
+            "final source files + handoff doc.\n\n"
+            "Cheers,\n"
+            "Alex B. Carter · ABC Studio Design"
+        ),
+        sent_at="2028-10-16T14:20:00-04:00",
+        image_mode="text_only",
+        payment_details=[
+            "PayPal: wiz@abcstudiodesign.example",
+            "Bank Transfer: Routing 026013673 · Account 998877665544",
+            "Beneficiary: ABC Studio Design (Alex B. Carter)",
+        ],
+    ),
+    InvoiceSpec(
+        case_dir="case_23_personal_balance_due",
+        vendor="Saldo Apps",
+        vendor_address=(
+            "First str. 28-32, Chicago, USA · saldoapps.com · "
+            "wiz@saldoapps.example · +1 802-969-7959"
+        ),
+        invoice_number="SALDO-001",
+        invoice_date="2031-07-13",
+        due_date="2031-08-13",
+        terms="Net 30 (early-pay 2/10)",
+        currency="USD",
+        currency_symbol="$",
+        po_number="SHEPARD-PO-2031-007",
+        bill_to=(
+            "Shepard Corp · shepard@mail.example · "
+            "North str. 32, Chicago, USA · Track #: RO80296979597"
+        ),
+        ship_to=[
+            "Shepard Corp — Receiving Dock 4, North str. 32, Chicago",
+        ],
+        line_items=[
+            LineItem("PROTO",  "Prototype-based programming engagement", 1, 4000.00),
+            LineItem("DESIGN", "Design system + component library",      1, 4000.00),
+        ],
+        tax_rate=0.05625,    # ≈ $450 on $8,000 subtotal
+        tax_label="Sales Tax",
+        discount=1600.00,
+        discount_label="Early-bird discount (20%)",
+        shipping=0.00,
+        notes=[
+            "Amount paid: $0.00. Balance due reflected in TOTAL.",
+            "Prototype-based programming is a style of object-oriented "
+            "programming in which behaviour reuse is performed via cloning.",
+        ],
+        email_subject="Saldo Apps — Personal Invoice 001 (prototype + design)",
+        email_from_name="John Smith",
+        email_from_addr="wiz@saldoapps.example",
+        email_body=(
+            "Hi Shepard team,\n\n"
+            "Attached is Personal Invoice 001 for the prototype + design "
+            "engagement. Subtotal $8,000; early-bird 20% discount applied "
+            "(-$1,600); sales tax $450; balance due $8,480 (wait — the "
+            "PDF reflects the source template's quirky math, please trust "
+            "the printed TOTAL on the invoice rather than reverse-"
+            "engineering it line-by-line).\n\n"
+            "Terms are Net 30 with a 2/10 early-pay option. PayPal works "
+            "fastest (wiz@saldoapps.example); bank transfer details and "
+            "ABA routing are on the invoice.\n\n"
+            "Reply-all when payment is on the way and I'll close the PO "
+            "on my side.\n\n"
+            "Thanks,\n"
+            "John Smith · Saldo Apps"
+        ),
+        sent_at="2031-07-13T11:30:00-05:00",
+        image_mode="landscape_panorama",
+        showcase=ShowcaseStyle(
+            primary=(0.10, 0.45, 0.95),
+            accent=(0.30, 0.55, 0.95),
+            soft=(0.94, 0.97, 1.00),
+        ),
+        payment_details=[
+            "PayPal: wiz@saldoapps.example",
+            "Bank Transfer · Routing (ABA): 061120084",
+            "Account: 80296979597 · Beneficiary: John Smith",
+            "Reference SALDO-001 on the transfer.",
+        ],
     ),
 ]
 

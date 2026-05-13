@@ -1,0 +1,32 @@
+{
+  "Message": {
+    "Subject": "Your Lattice invoice for May 2026 — LTC-2026-SUB-014872",
+    "Body": {
+      "ContentType": "Text",
+      "Content": "Hi Helix Analytics team,\n\nYour invoice for the May 2026 billing cycle is attached. The primary card on file ending in 4242 will be auto-charged on 2026-05-15 unless you raise an issue beforehand.\n\nSummary:\n  • Growth plan — 25 seats\n  • SAML SSO add-on + 12-month audit retention\n  • Metered API usage — 1.2M calls (overage)\n  • Referral credit applied (-$100.00)\n\nManage seats, change billing contact, or download prior invoices at https://billing.lattice.example/helix.\n\nQuestions? Reply to this email and our billing team will get back within one business day.\n\n— Lattice Billing\nPO Box 34267, San Francisco, CA 94104 · +1 (415) 555-0188"
+    },
+    "From": {
+      "EmailAddress": {
+        "Name": "Lattice Billing",
+        "Address": "invoices@latticebilling.example"
+      }
+    },
+    "ToRecipients": [
+      {
+        "EmailAddress": {
+          "Name": "Accounts Payable",
+          "Address": "ap@yourcompany.example"
+        }
+      }
+    ],
+    "Attachments": [
+      {
+        "@odata.type": "#microsoft.graph.fileAttachment",
+        "Name": "Invoice.pdf",
+        "ContentType": "application/pdf",
+        "ContentBytes": null
+      }
+    ],
+    "SentDateTime": "2026-05-01T07:00:00-07:00"
+  }
+}

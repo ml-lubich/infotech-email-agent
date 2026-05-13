@@ -10,6 +10,17 @@
 
 ## First-time setup
 
+```mermaid
+flowchart LR
+    A["uv sync"] --> B["cp .env.example .env"]
+    B --> C["edit .env<br/>OPENAI_API_KEY=sk-..."]
+    C --> D["uv run pytest<br/>(optional sanity)"]
+    D --> E["uv run python main.py<br/>--email examples/case_1/Email.json"]
+
+    classDef step fill:#0e1116,stroke:#2f81f7,color:#e6edf3;
+    class A,B,C,D,E step;
+```
+
 ```bash
 uv sync
 cp .env.example .env

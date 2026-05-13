@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 from dataclasses import dataclass
 from pathlib import Path
@@ -19,6 +20,9 @@ from invoice_agent.tools import (
 
 if TYPE_CHECKING:
     from openai import OpenAI
+
+
+log = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -125,8 +129,23 @@ def run_intake(
     email_data = json.loads(email_path.read_text(encoding="utf-8"))
     message = email_data.get("Message", email_data)
 
+    # --- Decision trail: what we read from the email ----------------------
+    sender = message.get("From") or message.get("Sender") or "(unknown)"
+    subject = message.get("Subject") or "(no subject)"
+    attachments = message.get("Attachments", []) or []
+    att_names = [a.get("Name") or "(unnamed)" for a in attachments]
+    _body_raw = message.get("Body") or message.get("BodyText") or ""
+    if isinstance(_body_raw, dict):
+        _body_raw = _body_raw.get("Content") or _body_raw.get("Text") or ""
+    body_preview = str(_body_raw)[:200].replace("\n", " ")
+    log.info("email parsed sender=%r subject=%r attachments=%s", sender, subject, att_names)
+    if body_preview:
+        log.info("email body_preview=%r", body_preview)
+    if message.get("PO") or message.get("PONumber"):
+        log.info("email PO_hint=%r", message.get("PO") or message.get("PONumber"))
+
+    explicit_pdf = pdf_path is not None
     if pdf_path is None:
-        attachments = message.get("Attachments", []) or []
         pdf_name = next(
             (
                 a.get("Name")
@@ -136,17 +155,24 @@ def run_intake(
             None,
         )
         if not pdf_name:
+            log.error("decision pdf_resolution=FAILED reason=no_pdf_in_attachments names=%s", att_names)
             raise ValueError("No PDF attachment found in email.")
         pdf_path = (email_path.parent / pdf_name).resolve()
+        log.info("decision pdf_resolution=auto chose=%r path=%s", pdf_name, pdf_path)
+    else:
+        log.info("decision pdf_resolution=explicit path=%s", pdf_path)
 
     pdf_path = pdf_path.expanduser().resolve()
     if not pdf_path.is_file():
+        log.error("decision pdf_check=MISSING path=%s explicit=%s", pdf_path, explicit_pdf)
         raise FileNotFoundError(f"PDF attachment not found: {pdf_path}")
+    log.info("pdf check=OK size_bytes=%d path=%s", pdf_path.stat().st_size, pdf_path)
 
     out_dir = out_dir.expanduser().resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
     # Tools read this env var to route artifacts; scoped to this run.
     os.environ[OUT_DIR_ENV] = str(out_dir)
+    log.info("agent model=%s out_dir_env=%s=%s", _AGENT_MODEL, OUT_DIR_ENV, out_dir)
 
     user_prompt = (
         "Inbound email JSON (verbatim):\n"
@@ -154,9 +180,12 @@ def run_intake(
         f"The PDF attachment is available locally at: {pdf_path}\n"
         "Run the intake workflow."
     )
+    log.info("agent invoking Runner.run_sync prompt_chars=%d", len(user_prompt))
 
     agent = build_agent()
     result = Runner.run_sync(agent, user_prompt)
+
+    _log_run_decisions(result)
 
     return IntakeResult(
         agent_reply=result.final_output or "",
@@ -165,3 +194,59 @@ def run_intake(
             "outbound_email.json": out_dir / "outbound_email.json",
         },
     )
+
+
+def _log_run_decisions(result: object) -> None:
+    """Walk the Agents SDK RunResult and emit a compact decision trail.
+
+    Captures every tool call (name + truncated arguments), every tool
+    output (truncated), assistant messages, and turn count. Defensive
+    against test stand-ins that only expose ``final_output``.
+    """
+    new_items = getattr(result, "new_items", None) or []
+    raw_responses = getattr(result, "raw_responses", None) or []
+    log.info("agent run completed turns=%d items=%d", len(raw_responses), len(new_items))
+
+    tool_calls: dict[str, str] = {}
+    for idx, item in enumerate(new_items):
+        kind = type(item).__name__
+        if kind == "ToolCallItem":
+            name = getattr(item, "tool_name", None) or "(unknown)"
+            call_id = getattr(item, "call_id", None) or f"#{idx}"
+            raw = getattr(item, "raw_item", None)
+            args = ""
+            if isinstance(raw, dict):
+                args = str(raw.get("arguments") or "")
+            else:
+                args = str(getattr(raw, "arguments", "") or "")
+            preview = args if len(args) <= 600 else args[:600] + f"...[+{len(args) - 600} chars]"
+            tool_calls[call_id] = name
+            log.info("decision tool_call name=%s call_id=%s args=%s", name, call_id, preview)
+        elif kind == "ToolCallOutputItem":
+            call_id = getattr(item, "call_id", None) or f"#{idx}"
+            name = tool_calls.get(call_id, "(unknown)")
+            output = getattr(item, "output", "")
+            text = output if isinstance(output, str) else json.dumps(output, ensure_ascii=False, default=str)
+            preview = text if len(text) <= 600 else text[:600] + f"...[+{len(text) - 600} chars]"
+            log.info("decision tool_output name=%s call_id=%s output=%s", name, call_id, preview)
+        elif kind == "MessageOutputItem":
+            raw = getattr(item, "raw_item", None)
+            text_parts: list[str] = []
+            content = getattr(raw, "content", None) or []
+            for part in content:
+                t = getattr(part, "text", None)
+                if t:
+                    text_parts.append(t)
+            msg = " ".join(text_parts).strip()
+            if msg:
+                preview = msg if len(msg) <= 400 else msg[:400] + f"...[+{len(msg) - 400} chars]"
+                log.info("decision assistant_message text=%r", preview)
+        elif kind == "ReasoningItem":
+            log.info("decision reasoning_item idx=%d (opaque)", idx)
+        else:
+            log.info("decision item kind=%s idx=%d", kind, idx)
+
+    final = getattr(result, "final_output", None) or ""
+    if final:
+        preview = final if len(final) <= 400 else final[:400] + f"...[+{len(final) - 400} chars]"
+        log.info("agent final_reply=%r", preview)

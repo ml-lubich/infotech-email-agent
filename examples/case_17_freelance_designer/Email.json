@@ -1,0 +1,32 @@
+{
+  "Message": {
+    "Subject": "Cava brand refresh — April invoice (Phase 1, MO-2026-0419)",
+    "Body": {
+      "ContentType": "Text",
+      "Content": "Hi Anke and Cava AP,\n\nAttached is the April 2026 invoice for the Cava Foods Europe brand refresh (Phase 1) under PO CAVA-PO-BRAND-26-014. It covers the discovery workshop, three logo directions, the refined master files, 42 senior design hours for April, the print-production spec sheet, and the EU 3-year asset usage license per our SOW dated 11 Feb 2026.\n\nBTW is charged at the standard NL rate (21%). Net 30 terms; preferred payment is SEPA — IBAN in the footer of the PDF.\n\nPhase 2 (packaging system) kicks off the week of 12 May; I'll send the updated SOW separately.\n\nWarm regards,\nMaya Okonkwo · Design Studio · Amsterdam\n+31 6 5544 0192 · maya@okonkwo-studio.example"
+    },
+    "From": {
+      "EmailAddress": {
+        "Name": "Maya Okonkwo",
+        "Address": "maya@okonkwo-studio.example"
+      }
+    },
+    "ToRecipients": [
+      {
+        "EmailAddress": {
+          "Name": "Accounts Payable",
+          "Address": "ap@yourcompany.example"
+        }
+      }
+    ],
+    "Attachments": [
+      {
+        "@odata.type": "#microsoft.graph.fileAttachment",
+        "Name": "Invoice.pdf",
+        "ContentType": "application/pdf",
+        "ContentBytes": null
+      }
+    ],
+    "SentDateTime": "2026-04-19T16:42:00+02:00"
+  }
+}

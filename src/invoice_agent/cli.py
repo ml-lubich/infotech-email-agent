@@ -24,6 +24,9 @@ def _configure_logging(log_path: Path) -> None:
         ],
         force=True,
     )
+    # Quiet third-party noise; keep our own decision trail loud.
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("openai").setLevel(logging.WARNING)
 
 
 def _parse_args(argv: list[str] | None) -> argparse.Namespace:
@@ -79,8 +82,19 @@ def main(argv: list[str] | None = None) -> int:
 
     _configure_logging(log_file)
     log = logging.getLogger("invoice_agent.cli")
-    log.info("starting intake email=%s pdf=%s out_dir=%s",
-             args.email, args.pdf, out_dir)
+    log.info("===== invoice-intake run START =====")
+    log.info("cwd=%s", Path.cwd())
+    log.info("email=%s", args.email.resolve())
+    log.info("pdf_arg=%s", args.pdf if args.pdf else "(auto-resolve from Email.json Attachments[])")
+    log.info("out_dir=%s", out_dir)
+    log.info("log_file=%s", log_file)
+    log.info(
+        "models agent=%s extract=%s (env: INVOICE_AGENT_MODEL=%r INVOICE_EXTRACT_MODEL=%r)",
+        os.getenv("INVOICE_AGENT_MODEL") or "(default)",
+        os.getenv("INVOICE_EXTRACT_MODEL") or "(default)",
+        os.getenv("INVOICE_AGENT_MODEL"),
+        os.getenv("INVOICE_EXTRACT_MODEL"),
+    )
 
     try:
         result = run_intake(
@@ -96,6 +110,11 @@ def main(argv: list[str] | None = None) -> int:
         log.exception("intake crashed: %s", exc)
         print(f"ERROR: {exc}", file=sys.stderr)
         return 1
+
+    for name, path in result.artifacts.items():
+        marker = "OK" if path.is_file() else "MISSING"
+        log.info("artifact %s status=%s path=%s", name, marker, path)
+    log.info("===== invoice-intake run END =====")
 
     print(result.agent_reply)
     print()

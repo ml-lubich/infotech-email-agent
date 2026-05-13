@@ -27,6 +27,15 @@ DEFAULT_CASES: list[str] = [
     "case_12_fraud_bank_change",
     "case_13_prompt_injection",
     "case_14_duplicate_number",
+    "case_15_saas_subscription",
+    "case_16_cloud_services_bill",
+    "case_17_freelance_designer",
+    "case_18_telecom_enterprise",
+    "case_19_minimal_portrait",
+    "case_20_architectural_banded",
+    "case_21_landscape_panorama",
+    "case_22_freelance_compact",
+    "case_23_personal_balance_due",
 ]
 
 

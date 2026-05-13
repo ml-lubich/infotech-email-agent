@@ -5,9 +5,65 @@ PDF and emits a Customer Service notification.
 
 ## Table of contents
 
+- [High-level diagram](#high-level-diagram)
 - [Layers](#layers)
 - [Module map](#module-map)
+- [Data flow (sequence)](#data-flow-sequence)
+- [InvoicePayload schema](#invoicepayload-schema)
 - [Architectural invariants](#architectural-invariants)
+
+## High-level diagram
+
+```mermaid
+flowchart LR
+    subgraph IN["📥 Inputs (untrusted)"]
+        E[("📧 Email.json")]
+        P[("📎 Invoice.pdf")]
+    end
+    subgraph CLI["🧰 invoice_agent.cli"]
+        A["main()<br/>argparse + .env"]
+    end
+    subgraph CORE["🧠 invoice_agent.agent"]
+        R["run_intake()"]
+        AG{{"🤖 Agent<br/>gpt-5-mini"}}
+    end
+    subgraph TOOLS["🛠 invoice_agent.tools"]
+        T1["🔍 extract_invoice_from_pdf"]
+        T2["📤 send_customer_service_notification"]
+    end
+    subgraph PURE["🔬 Pure helpers"]
+        PE["pdf_extract.py"]
+        SC["schema.py · InvoicePayload"]
+        ML["models.py · allow-list"]
+    end
+    subgraph OUT["📤 Outputs"]
+        TXT[/"outbound_email.txt"/]
+        JSON[/"outbound_email.json"/]
+        LOG[/"run.log"/]
+    end
+
+    E --> A --> R --> AG
+    P --> R
+    AG --> T1 --> PE
+    T1 --> SC
+    AG --> T2
+    T2 --> TXT
+    T2 --> JSON
+    A --> LOG
+    AG -.uses.-> ML
+    T1 -.uses.-> ML
+
+    classDef in fill:#3d1e1e,stroke:#f85149,color:#fbe7e7;
+    classDef sys fill:#0e1116,stroke:#2f81f7,color:#e6edf3;
+    classDef brain fill:#161b22,stroke:#d29922,color:#e6edf3;
+    classDef tool fill:#0e1116,stroke:#3fb950,color:#e6edf3;
+    classDef out fill:#0e1116,stroke:#a371f7,color:#e6edf3;
+    class IN,E,P in;
+    class CLI,A,CORE,R sys;
+    class AG brain;
+    class TOOLS,T1,T2,PURE,PE,SC,ML tool;
+    class OUT,TXT,JSON,LOG out;
+```
 
 ## Layers
 
@@ -43,6 +99,81 @@ main.py  ──►  invoice_agent.cli.main()
 | `invoice_agent/pdf_extract.py` | Deterministic PDF text + image extraction. |
 | `invoice_agent/schema.py` | Pydantic `InvoicePayload` + nested models. |
 | `invoice_agent/models.py` | Allow-list (`gpt-5-mini` / `gpt-5-nano`). |
+
+## Data flow (sequence)
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor User
+    participant CLI as cli.main()
+    participant Agent as Runner / Agent
+    participant Extract as extract_invoice_from_pdf
+    participant PDF as pdf_extract
+    participant Vision as OpenAI<br/>(gpt-5-mini)
+    participant Notify as send_customer_service_notification
+    participant FS as ./out/&lt;case&gt;/
+
+    User->>CLI: --email examples/case_X/Email.json
+    CLI->>CLI: load .env, validate OPENAI_API_KEY
+    CLI->>CLI: resolve out_dir, set INVOICE_OUT_DIR
+    CLI->>Agent: run_intake(email, pdf, out_dir)
+    Agent->>Extract: tool call (pdf_path)
+    Extract->>PDF: extract_pdf_content()
+    PDF-->>Extract: text + image bytes
+    Extract->>Vision: structured output (text + images)
+    Vision-->>Extract: InvoicePayload (+ risk_flags)
+    Extract-->>Agent: JSON payload
+    Agent->>Notify: tool call (summary, payload_json)
+    Notify->>FS: outbound_email.txt
+    Notify->>FS: outbound_email.json
+    Notify-->>Agent: "Notification written to ..."
+    Agent-->>CLI: one-line confirmation
+    CLI->>FS: run.log
+    CLI-->>User: exit 0
+```
+
+## InvoicePayload schema
+
+```mermaid
+classDiagram
+    class InvoicePayload {
+      +str? vendor_name
+      +str? invoice_number
+      +str? invoice_date
+      +str? due_date
+      +str? payment_terms
+      +str? currency
+      +str? customer_po_number
+      +float? subtotal
+      +float? total_due
+      +list~TaxBreakdown~ taxes
+      +list~LineItem~ line_items
+      +list~ShipTo~ ship_to
+      +list~str~ notes
+      +list~str~ source_warnings
+      +list~str~ risk_flags
+    }
+    class LineItem {
+      +str? sku
+      +str? description
+      +float? quantity
+      +float? unit_price
+      +float? line_total
+    }
+    class TaxBreakdown {
+      +str label
+      +float? amount
+      +str? rate
+    }
+    class ShipTo {
+      +str location
+      +str? allocation
+    }
+    InvoicePayload "1" o-- "*" LineItem
+    InvoicePayload "1" o-- "*" TaxBreakdown
+    InvoicePayload "1" o-- "*" ShipTo
+```
 
 ## Architectural invariants
 

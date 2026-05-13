@@ -388,6 +388,13 @@ def create_app() -> FastAPI:
         @app.get("/", include_in_schema=False)
         def _index() -> FileResponse:
             return FileResponse(FRONTEND_DIST / "index.html")
+
+        favicon_path = FRONTEND_DIST / "favicon.svg"
+        if favicon_path.is_file():
+            @app.get("/favicon.ico", include_in_schema=False)
+            @app.get("/favicon.svg", include_in_schema=False)
+            def _favicon() -> FileResponse:
+                return FileResponse(favicon_path, media_type="image/svg+xml")
     else:
         @app.get("/", include_in_schema=False)
         def _missing_bundle() -> JSONResponse:

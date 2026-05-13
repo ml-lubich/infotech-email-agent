@@ -90,6 +90,7 @@ shipped fixtures.
 - [Docs](#docs)
 - [Tests](#tests)
 - [Error handling](#error-handling)
+- [📊 Code composition](#-code-composition)
 
 ## What it does
 
@@ -386,3 +387,20 @@ The CLI returns non-zero on:
 
 Schema validation issues are surfaced via `InvoicePayload.source_warnings`
 rather than aborting the run.
+
+
+## 📊 Code composition
+
+File-type breakdown of source under this repo (skips `.git`, `node_modules`, build caches, lockfiles).
+
+```mermaid
+pie showData title File-type composition of infotech-email-agent (135 files)
+    "Python" : 47
+    "JSON" : 30
+    "Other" : 32
+    "TypeScript" : 16
+    "Markdown" : 7
+    "HTML" : 1
+    "CSS" : 1
+    "Docker" : 1
+```

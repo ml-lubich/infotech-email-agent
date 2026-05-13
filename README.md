@@ -10,8 +10,8 @@ flowchart LR
     EMAIL[("📧<br/>Email.json")]
     PDF[("📎<br/>Invoice.pdf")]
     AGENT{{"🤖 Agent<br/><code>gpt-5-mini</code>"}}
-    EXTRACT["🔍 extract_invoice_from_pdf<br/><i>PyMuPDF + vision</i>"]
-    NOTIFY["📤 send_customer_service_notification"]
+    EXTRACT["🔍 extract_invoice<br/>_from_pdf<br/><i>PyMuPDF + vision</i>"]
+    NOTIFY["📤 send_customer<br/>_service_notification"]
     TXT[/"📄 outbound_email.txt"/]
     JSON[/"🧾 outbound_email.json"/]
     LOG[/"📜 run.log"/]
@@ -238,7 +238,7 @@ sequenceDiagram
     participant Extract as extract_invoice_from_pdf
     participant Vision as OpenAI<br/>(gpt-5-mini)
     participant Notify as send_customer_service_notification
-    participant FS as ./out/&lt;case&gt;/
+    participant FS as out/case/
 
     User->>CLI: --email examples/case_1/Email.json
     CLI->>CLI: load .env, validate OPENAI_API_KEY

@@ -11,6 +11,10 @@ from pathlib import Path
 from agents import function_tool
 from openai import OpenAI
 
+from invoice_agent.guardrails import (
+    apply_output_guardrails,
+    read_injection_signals,
+)
 from invoice_agent.models import DEFAULT_EXTRACT_MODEL, resolve_model
 from invoice_agent.pdf_extract import extract_pdf_content
 from invoice_agent.schema import InvoicePayload
@@ -234,8 +238,28 @@ def _send_customer_service_notification_impl(
             log.warning("notify FORWARDED risk_flags=%s", flags)
         if warnings:
             log.warning("notify forwarded source_warnings=%s", warnings)
+    # --- Output guardrail (deterministic, post-LLM) -------------------
+    # Merge env-published input signals + scan the summary for unsafe
+    # auto-approval language. Additive: never removes existing flags.
+    input_signals = read_injection_signals()
+    if isinstance(parsed_preview, dict):
+        guarded_summary, guarded_payload, triggered = apply_output_guardrails(
+            summary_markdown=summary_markdown,
+            payload=parsed_preview,
+            input_signals=input_signals,
+        )
+        if triggered:
+            log.warning("guardrail output_scan FIRED triggered=%s", triggered)
+        final_summary = guarded_summary
+        final_payload_json = json.dumps(guarded_payload, ensure_ascii=False)
+    else:
+        # payload_json wasn't a dict — let write_notification_files raise
+        # the canonical ValueError so we don't paper over malformed input.
+        final_summary = summary_markdown
+        final_payload_json = payload_json
+
     txt_path, json_path = write_notification_files(
-        summary_markdown, payload_json, out_dir
+        final_summary, final_payload_json, out_dir
     )
     log.info("notification written txt=%s json=%s", txt_path, json_path)
     return f"Notification written: {txt_path} and {json_path}"

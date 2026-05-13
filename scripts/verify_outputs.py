@@ -36,6 +36,11 @@ DEFAULT_CASES: list[str] = [
     "case_21_landscape_panorama",
     "case_22_freelance_compact",
     "case_23_personal_balance_due",
+    "case_24_wrong_total_arithmetic",
+    "case_25_credit_memo_refund",
+    "case_26_partial_refund_discount",
+    "case_27_tax_rate_label_mismatch",
+    "case_28_terms_due_date_conflict",
 ]
 
 

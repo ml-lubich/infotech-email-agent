@@ -1,0 +1,32 @@
+{
+  "Message": {
+    "Subject": "Harbor & Pike — Q2 marketing invoice (terms vs due date conflict)",
+    "Body": {
+      "ContentType": "Text",
+      "Content": "Hi Pinefield AP,\n\nAttached is invoice HPM-INV-2026-0214 for the Q2 brand campaign (strategy + creative + photo day + web copy refresh) under PO PINEFIELD-PO-2026-031.\n\nHeads-up — the terms on the PDF say 'Net 30' but the due-date field shows 2026-05-15 (only 5 days from invoice date). That's a template bug on our side. Please treat Net 30 as authoritative (real due date is 2026-06-09); I'll reissue a clean copy if you need it for audit.\n\n$500 loyalty credit already applied as a negative line. No sales tax — services category is ME-exempt.\n\nThanks for the patience,\nTasha Bowman · Harbor & Pike Marketing Studio"
+    },
+    "From": {
+      "EmailAddress": {
+        "Name": "Tasha Bowman",
+        "Address": "tasha.bowman@harborpike.example"
+      }
+    },
+    "ToRecipients": [
+      {
+        "EmailAddress": {
+          "Name": "Accounts Payable",
+          "Address": "ap@yourcompany.example"
+        }
+      }
+    ],
+    "Attachments": [
+      {
+        "@odata.type": "#microsoft.graph.fileAttachment",
+        "Name": "Invoice.pdf",
+        "ContentType": "application/pdf",
+        "ContentBytes": null
+      }
+    ],
+    "SentDateTime": "2026-05-10T13:20:00-04:00"
+  }
+}

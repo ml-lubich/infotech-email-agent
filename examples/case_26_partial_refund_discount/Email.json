@@ -1,0 +1,32 @@
+{
+  "Message": {
+    "Subject": "Northwind Coffee — May invoice w/ partial refund + loyalty discount",
+    "Body": {
+      "ContentType": "Text",
+      "Content": "Hi Harborview AP,\n\nAttached is invoice NOC-2026-04-0917 for May supplies under PO HARBORVIEW-PO-2026-77 (Net 30, 2/10 net 30).\n\nTwo adjustments to flag explicitly so they don't get lost:\n  1. Partial refund of $160 for the spoiled oat-milk on the      04/18 delivery (driver report attached separately).\n  2. Loyalty discount of 5% applied to coffee + tea per the      pricing rider — visible as a negative line on the PDF.\n\nIf you pay within 10 days you get an additional 2% off automatically — system will reconcile on receipt.\n\nThanks,\nRenee Carter · Northwind Office Coffee & Pantry"
+    },
+    "From": {
+      "EmailAddress": {
+        "Name": "Renee Carter",
+        "Address": "renee.carter@northwind-coffee.example"
+      }
+    },
+    "ToRecipients": [
+      {
+        "EmailAddress": {
+          "Name": "Accounts Payable",
+          "Address": "ap@yourcompany.example"
+        }
+      }
+    ],
+    "Attachments": [
+      {
+        "@odata.type": "#microsoft.graph.fileAttachment",
+        "Name": "Invoice.pdf",
+        "ContentType": "application/pdf",
+        "ContentBytes": null
+      }
+    ],
+    "SentDateTime": "2026-05-01T08:25:00-04:00"
+  }
+}

@@ -1,0 +1,32 @@
+{
+  "Message": {
+    "Subject": "Atlas Industrial — CREDIT MEMO ATLAS-CM-2026-0188 (do not pay)",
+    "Body": {
+      "ContentType": "Text",
+      "Content": "Hi Midwest Hydraulics AP,\n\nAttached is credit memo ATLAS-CM-2026-0188 covering the RMA #4471 returns from last week (12 hydraulic valves + 8 seal kits). It is NOT an invoice — please apply the credit against original invoice ATLAS-INV-2026-0142 before settling next month's run.\n\nAll amounts are negative on the document; the proportional PA sales tax has been refunded as well. Restocking fee was waived per our CSM agreement.\n\nReply-all if your system needs a re-issued copy in any specific format (cXML, EDI 812, etc.).\n\nThanks,\nMegan Liu · Atlas Industrial Parts Co."
+    },
+    "From": {
+      "EmailAddress": {
+        "Name": "Megan Liu",
+        "Address": "megan.liu@atlas-industrial.example"
+      }
+    },
+    "ToRecipients": [
+      {
+        "EmailAddress": {
+          "Name": "Accounts Payable",
+          "Address": "ap@yourcompany.example"
+        }
+      }
+    ],
+    "Attachments": [
+      {
+        "@odata.type": "#microsoft.graph.fileAttachment",
+        "Name": "Invoice.pdf",
+        "ContentType": "application/pdf",
+        "ContentBytes": null
+      }
+    ],
+    "SentDateTime": "2026-05-06T15:10:00-04:00"
+  }
+}

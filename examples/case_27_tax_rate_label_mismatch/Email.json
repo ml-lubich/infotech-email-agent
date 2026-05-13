@@ -1,0 +1,32 @@
+{
+  "Message": {
+    "Subject": "Cascade Web Services — Q2 hosting invoice (tax label looks wrong)",
+    "Body": {
+      "ContentType": "Text",
+      "Content": "Hi Lakefront AP,\n\nAttached is invoice CWS-2026-Q2-0042 for the Q2 managed hosting + backup retention under PO LAKEFRONT-PO-2026-018 (Net 30).\n\nQuick disclosure: the tax line on the PDF is labelled '5% GST' but the dollar amount actually reflects Ontario HST at 13% (which is what your account is registered for). Please treat the printed AMOUNT as authoritative — we will reissue with the correct LABEL on the next billing run. Flag it on your side too so the GL posts to the right tax account.\n\nThanks,\nDevon Ng · Cascade Web Services Ltd."
+    },
+    "From": {
+      "EmailAddress": {
+        "Name": "Devon Ng",
+        "Address": "devon.ng@cascade-web.example"
+      }
+    },
+    "ToRecipients": [
+      {
+        "EmailAddress": {
+          "Name": "Accounts Payable",
+          "Address": "ap@yourcompany.example"
+        }
+      }
+    ],
+    "Attachments": [
+      {
+        "@odata.type": "#microsoft.graph.fileAttachment",
+        "Name": "Invoice.pdf",
+        "ContentType": "application/pdf",
+        "ContentBytes": null
+      }
+    ],
+    "SentDateTime": "2026-05-09T11:00:00-04:00"
+  }
+}

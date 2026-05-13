@@ -1,0 +1,32 @@
+{
+  "Message": {
+    "Subject": "Brightline — May supplies invoice (please double-check totals)",
+    "Body": {
+      "ContentType": "Text",
+      "Content": "Hi AP,\n\nAttached is invoice BOS-2026-0531 for the May office refresh order under PO MERIDIAN-PO-44021 (Net 30).\n\nHeads-up: our billing system is mid-migration and a colleague flagged that the subtotal/tax/total on this invoice may not reconcile against the line items — please double-check before approving. If the math is off I will reissue a corrected invoice (BOS-2026-0531-R).\n\nThanks for catching anything that looks wrong,\nGreg Holloway · Brightline Office Supplies LLC"
+    },
+    "From": {
+      "EmailAddress": {
+        "Name": "Greg Holloway",
+        "Address": "greg.holloway@brightline-office.example"
+      }
+    },
+    "ToRecipients": [
+      {
+        "EmailAddress": {
+          "Name": "Accounts Payable",
+          "Address": "ap@yourcompany.example"
+        }
+      }
+    ],
+    "Attachments": [
+      {
+        "@odata.type": "#microsoft.graph.fileAttachment",
+        "Name": "Invoice.pdf",
+        "ContentType": "application/pdf",
+        "ContentBytes": null
+      }
+    ],
+    "SentDateTime": "2026-05-04T09:45:00-04:00"
+  }
+}

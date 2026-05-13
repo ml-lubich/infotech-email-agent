@@ -34,9 +34,12 @@ def test_page_get_text_failure_records_empty_string(
         raise RuntimeError("text engine down")
 
     monkeypatch.setattr(fitz.Page, "get_text", _boom)
+    # Disable the OCR fallback so empty native text stays empty.
+    monkeypatch.setattr(pdf_extract, "_get_ocr_engine", lambda: None)
     content = pdf_extract.extract_pdf_content(pdf)
     # All page texts collapsed to "".
     assert all(t == "" for t in content.page_texts)
+    assert content.ocr_pages == []
 
 
 def test_page_get_images_failure_skips_image_loop(

@@ -65,6 +65,30 @@ def _resolve_out_dir(email: Path, override: Path | None) -> Path:
     return Path.cwd() / "out" / case_name
 
 
+def _build_openai_client(log: logging.Logger) -> object | None:
+    """Construct an OpenAI client for the LLM pipeline shots.
+
+    Activates `critic_review` and `injection_screen` (Pass 3 + Pass 4) in
+    production. Set ``INVOICE_PIPELINE_LLM_DISABLED=1`` to opt out and run
+    deterministic-only (cheaper, the two LLM shots will be SKIPPED).
+    """
+    if os.getenv("INVOICE_PIPELINE_LLM_DISABLED") == "1":
+        log.info("pipeline LLM shots disabled via INVOICE_PIPELINE_LLM_DISABLED=1")
+        return None
+    try:
+        from openai import OpenAI
+
+        client = OpenAI()
+        log.info("pipeline OpenAI client built (LLM shots ACTIVE)")
+        return client
+    except Exception as exc:  # noqa: BLE001 — surface, do not silently degrade
+        log.warning(
+            "pipeline OpenAI client unavailable (%s); LLM shots will be SKIPPED",
+            exc,
+        )
+        return None
+
+
 def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv)
     load_dotenv()
@@ -97,10 +121,12 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     try:
+        client = _build_openai_client(log)
         result = run_intake(
             email_path=args.email,
             pdf_path=args.pdf,
             out_dir=out_dir,
+            openai_client=client,
         )
     except (FileNotFoundError, ValueError) as exc:
         log.error("intake failed: %s", exc)

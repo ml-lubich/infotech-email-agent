@@ -21,3 +21,6 @@ run.log
 htmlcov/
 coverage.xml
 
+
+# Local scratch
+/tmp/

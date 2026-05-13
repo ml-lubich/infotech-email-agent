@@ -189,6 +189,17 @@ class InvoiceSpec:
     shipping: float = 0.0
     # Optional signature blurb rendered at the very bottom (minimal layout).
     signature_name: str = ""
+    # ----- intentional-error overrides -----------------------------------
+    # When set, the renderer prints THESE values instead of the
+    # arithmetically-correct ones derived from line_items / tax_rate.
+    # Used by the "wrong invoice" edge-case fixtures so the agent has to
+    # raise a `totals_inconsistent` (or similar) risk flag.
+    override_printed_subtotal: float | None = None
+    override_printed_tax: float | None = None
+    override_printed_total: float | None = None
+    # Free-form label printed in place of the standard "(NN.NN%)" tax rate
+    # — e.g. "(8.25%)" while the printed amount actually reflects ~12%.
+    override_tax_rate_label: str | None = None
 
 
 def _make_stamp(invoice_number: str) -> bytes:
@@ -623,15 +634,28 @@ def _build_minimal_portrait_pdf(spec: InvoiceSpec, out_path: Path) -> None:
     y += 6
     page.draw_line(fitz.Point(60, y), fitz.Point(560, y), color=(0.7, 0.7, 0.7))
     y += 16
+    printed_subtotal = (
+        spec.override_printed_subtotal if spec.override_printed_subtotal is not None
+        else lines_subtotal
+    )
+    printed_total = (
+        spec.override_printed_total if spec.override_printed_total is not None
+        else total
+    )
+    tax_rate_label = (
+        spec.override_tax_rate_label
+        if spec.override_tax_rate_label is not None
+        else f"{spec.tax_rate * 100:.0f}%"
+    )
     page.insert_text((60, y), "SUBTOTAL", fontname="hebo", fontsize=10)
-    page.insert_text((510, y), _format_money(lines_subtotal, spec.currency_symbol),
+    page.insert_text((510, y), _format_money(printed_subtotal, spec.currency_symbol),
                      fontname="hebo", fontsize=10)
     y += 16
     page.insert_text((430, y), f"{spec.tax_label}", fontname="helv", fontsize=10)
-    page.insert_text((510, y), f"{spec.tax_rate * 100:.0f}%", fontname="helv", fontsize=10)
+    page.insert_text((510, y), tax_rate_label, fontname="helv", fontsize=10)
     y += 16
     page.insert_text((430, y), "TOTAL", fontname="hebo", fontsize=11)
-    page.insert_text((510, y), _format_money(total, spec.currency_symbol),
+    page.insert_text((510, y), _format_money(printed_total, spec.currency_symbol),
                      fontname="hebo", fontsize=11)
 
     # Signature
@@ -852,14 +876,30 @@ def _build_landscape_panorama_pdf(spec: InvoiceSpec, out_path: Path) -> None:
 
     # Totals box (right)
     tx, ty, tw = 560, 470, 192
+    printed_subtotal = (
+        spec.override_printed_subtotal if spec.override_printed_subtotal is not None
+        else lines_subtotal
+    )
+    printed_tax = (
+        spec.override_printed_tax if spec.override_printed_tax is not None else tax
+    )
+    printed_total = (
+        spec.override_printed_total if spec.override_printed_total is not None
+        else total
+    )
+    tax_rate_label = (
+        spec.override_tax_rate_label
+        if spec.override_tax_rate_label is not None
+        else f"({spec.tax_rate * 100:.1f}%)"
+    )
     rows: list[tuple[str, str]] = [
-        ("Subtotal", _format_money(lines_subtotal, spec.currency_symbol)),
+        ("Subtotal", _format_money(printed_subtotal, spec.currency_symbol)),
     ]
     if spec.discount:
         rows.append((spec.discount_label,
                      "-" + _format_money(spec.discount, spec.currency_symbol)))
-    rows.append((f"{spec.tax_label} ({spec.tax_rate * 100:.1f}%)",
-                 _format_money(tax, spec.currency_symbol)))
+    rows.append((f"{spec.tax_label} {tax_rate_label}",
+                 _format_money(printed_tax, spec.currency_symbol)))
     if spec.shipping:
         rows.append(("Shipping Cost", _format_money(spec.shipping, spec.currency_symbol)))
     for i, (label, val) in enumerate(rows):
@@ -874,7 +914,7 @@ def _build_landscape_panorama_pdf(spec: InvoiceSpec, out_path: Path) -> None:
     page.insert_text((tx + 6, ry + 16), "Grand Total",
                      fontname="hebo", fontsize=10, color=style.text_on_primary)
     page.insert_text((tx + 130, ry + 16),
-                     _format_money(total, spec.currency_symbol),
+                     _format_money(printed_total, spec.currency_symbol),
                      fontname="hebo", fontsize=10, color=style.text_on_primary)
 
     # Notes / payment (left)
@@ -1017,19 +1057,54 @@ def _build_pdf(spec: InvoiceSpec, out_path: Path) -> None:
 
     y += 6
     page.draw_line(fitz.Point(360, y), fitz.Point(562, y))
+    y += 6
+    printed_subtotal = (
+        spec.override_printed_subtotal if spec.override_printed_subtotal is not None
+        else subtotal
+    )
+    printed_tax = (
+        spec.override_printed_tax if spec.override_printed_tax is not None else tax
+    )
+    printed_total = (
+        spec.override_printed_total if spec.override_printed_total is not None
+        else total
+    )
+    tax_rate_label = (
+        spec.override_tax_rate_label
+        if spec.override_tax_rate_label is not None
+        else f"({spec.tax_rate * 100:.1f}%)"
+    )
+
+    # Right-aligned, non-overlapping totals panel.
+    # Label column is wide enough to absorb verbose labels (e.g. "No tax
+    # (sole proprietor, services only)") without crashing into the amount
+    # column. Amount column is right-aligned so currency strings of any
+    # width stay flush with the page rule.
+    def _totals_row(yy: float, label: str, amount: str, fontsize: int) -> None:
+        row_h = fontsize + 8
+        page.insert_textbox(
+            fitz.Rect(50, yy - 2, 482, yy + row_h),
+            label,
+            fontname="helv",
+            fontsize=fontsize,
+            align=2,  # right
+        )
+        page.insert_textbox(
+            fitz.Rect(486, yy - 2, 562, yy + row_h),
+            amount,
+            fontname="helv",
+            fontsize=fontsize,
+            align=2,  # right
+        )
+
+    _totals_row(y, "Subtotal:",
+                _format_money(printed_subtotal, spec.currency_symbol), 10)
     y += 14
-    page.insert_text((410, y), "Subtotal:", fontname="helv", fontsize=10)
-    page.insert_text((490, y), _format_money(subtotal, spec.currency_symbol),
-                      fontname="helv", fontsize=10)
+    _totals_row(y, f"{spec.tax_label} {tax_rate_label}:",
+                _format_money(printed_tax, spec.currency_symbol), 10)
     y += 14
-    page.insert_text((410, y), f"{spec.tax_label} ({spec.tax_rate * 100:.1f}%):",
-                      fontname="helv", fontsize=10)
-    page.insert_text((490, y), _format_money(tax, spec.currency_symbol),
-                      fontname="helv", fontsize=10)
-    y += 14
-    page.insert_text((410, y), "TOTAL DUE:", fontname="helv", fontsize=11)
-    page.insert_text((490, y), _format_money(total, spec.currency_symbol),
-                      fontname="helv", fontsize=11)
+    _totals_row(y, "TOTAL DUE:",
+                _format_money(printed_total, spec.currency_symbol), 11)
 
     # Notes
     y += 28
@@ -2146,6 +2221,309 @@ SPECS: list[InvoiceSpec] = [
             "Account: 80296979597 · Beneficiary: John Smith",
             "Reference SALDO-001 on the transfer.",
         ],
+    ),
+    # ----- edge-case "wrong invoice" / refund / discount fixtures (24-28) ----
+    InvoiceSpec(
+        case_dir="case_24_wrong_total_arithmetic",
+        vendor="Brightline Office Supplies LLC",
+        vendor_address="500 Industrial Pkwy, Columbus, OH 43215 · EIN 26-9988772",
+        invoice_number="BOS-2026-0531",
+        invoice_date="2026-05-04",
+        due_date="2026-06-03",
+        terms="Net 30",
+        currency="USD",
+        currency_symbol="$",
+        po_number="MERIDIAN-PO-44021",
+        bill_to="Meridian Holdings Inc., 200 Capitol St, Columbus, OH 43215",
+        ship_to=["Meridian Holdings — Floor 12 Mailroom"],
+        line_items=[
+            # True subtotal: 1500 + 480 + 360 + 220 = 2,560.00
+            # True tax @ 7.5%: 192.00  ->  true total: 2,752.00
+            LineItem("CHAIR-EX",  "Executive task chairs",            10, 150.00),
+            LineItem("DESK-LMT",  "Adjustable laminate desks",         4, 120.00),
+            LineItem("MON-ARM",   "Dual monitor arms",                12,  30.00),
+            LineItem("CABLE-MGT", "Cable management trays",           20,  11.00),
+        ],
+        tax_rate=0.075,
+        tax_label="Ohio sales tax",
+        notes=[
+            "Vendor totals look off — subtotal/tax/total on the invoice do "
+            "not reconcile against the line items. Please verify before "
+            "approving payment.",
+        ],
+        # Printed totals are WRONG on purpose (typo / stale spreadsheet).
+        # Printed subtotal claims $2,650 (off by +$90) and the printed
+        # total claims $2,950 (off by ~$198 vs correct $2,752).
+        override_printed_subtotal=2650.00,
+        override_printed_total=2950.00,
+        email_subject="Brightline — May supplies invoice (please double-check totals)",
+        email_from_name="Greg Holloway",
+        email_from_addr="greg.holloway@brightline-office.example",
+        email_body=(
+            "Hi AP,\n\n"
+            "Attached is invoice BOS-2026-0531 for the May office "
+            "refresh order under PO MERIDIAN-PO-44021 (Net 30).\n\n"
+            "Heads-up: our billing system is mid-migration and a "
+            "colleague flagged that the subtotal/tax/total on this "
+            "invoice may not reconcile against the line items — "
+            "please double-check before approving. If the math is "
+            "off I will reissue a corrected invoice (BOS-2026-0531-R).\n\n"
+            "Thanks for catching anything that looks wrong,\n"
+            "Greg Holloway · Brightline Office Supplies LLC"
+        ),
+        sent_at="2026-05-04T09:45:00-04:00",
+        image_mode="text_only",
+    ),
+    InvoiceSpec(
+        case_dir="case_25_credit_memo_refund",
+        vendor="Atlas Industrial Parts Co.",
+        vendor_address="800 Foundry Rd, Pittsburgh, PA 15203 · EIN 25-7766554",
+        # Credit memo — vendor's own number scheme tags it CM-…
+        invoice_number="ATLAS-CM-2026-0188",
+        invoice_date="2026-05-06",
+        due_date="2026-05-06",     # credits don't have a "due date"
+        terms="Credit memo — apply against AP balance",
+        currency="USD",
+        currency_symbol="$",
+        po_number="MHI-PO-2026-3318",
+        bill_to=(
+            "Midwest Hydraulics Inc., 4400 Industrial Blvd, "
+            "Cleveland, OH 44115"
+        ),
+        ship_to=["Returns received at Atlas RMA dock — Pittsburgh"],
+        line_items=[
+            # Negative line totals — this is a refund / credit memo.
+            LineItem(
+                "RTN-VLV-12",
+                "Return: hydraulic valves (defective lot, RMA #4471)",
+                -12, 285.00,
+            ),
+            LineItem(
+                "RTN-SEAL-04",
+                "Return: o-ring seal kits (over-shipped, RMA #4471)",
+                -8, 42.50,
+            ),
+            LineItem(
+                "RESTOCK-FEE",
+                "Restocking fee waiver (per CSM agreement)",
+                1, 0.00,
+            ),
+        ],
+        tax_rate=0.07,
+        tax_label="PA sales tax (refunded proportionally)",
+        notes=[
+            "CREDIT MEMO — DO NOT PAY. This document reduces the open "
+            "AP balance against original invoice ATLAS-INV-2026-0142.",
+            "RMA #4471 — goods received and inspected on 2026-05-02.",
+            "Restocking fee waived per CSM agreement (Megan Liu).",
+            "Apply credit before settling next month's invoice.",
+        ],
+        email_subject="Atlas Industrial — CREDIT MEMO ATLAS-CM-2026-0188 (do not pay)",
+        email_from_name="Megan Liu",
+        email_from_addr="megan.liu@atlas-industrial.example",
+        email_body=(
+            "Hi Midwest Hydraulics AP,\n\n"
+            "Attached is credit memo ATLAS-CM-2026-0188 covering the "
+            "RMA #4471 returns from last week (12 hydraulic valves + "
+            "8 seal kits). It is NOT an invoice — please apply the "
+            "credit against original invoice ATLAS-INV-2026-0142 "
+            "before settling next month's run.\n\n"
+            "All amounts are negative on the document; the proportional "
+            "PA sales tax has been refunded as well. Restocking fee was "
+            "waived per our CSM agreement.\n\n"
+            "Reply-all if your system needs a re-issued copy in any "
+            "specific format (cXML, EDI 812, etc.).\n\n"
+            "Thanks,\n"
+            "Megan Liu · Atlas Industrial Parts Co."
+        ),
+        sent_at="2026-05-06T15:10:00-04:00",
+        image_mode="text_only",
+    ),
+    InvoiceSpec(
+        case_dir="case_26_partial_refund_discount",
+        vendor="Northwind Office Coffee & Pantry",
+        vendor_address="120 Roastery Way, Burlington, VT 05401 · EIN 27-3344556",
+        invoice_number="NOC-2026-04-0917",
+        invoice_date="2026-05-01",
+        due_date="2026-05-31",
+        terms="Net 30 (2/10 net 30)",
+        currency="USD",
+        currency_symbol="$",
+        po_number="HARBORVIEW-PO-2026-77",
+        bill_to=(
+            "Harborview Health Network, 1500 Bay St, "
+            "Boston, MA 02210"
+        ),
+        ship_to=[
+            "Harborview Health — Tower A pantry",
+            "Harborview Health — Tower B pantry",
+        ],
+        line_items=[
+            # Subtotal pre-credits: 2400 + 480 + 320 = 3,200
+            # Then a partial-refund credit line and a goodwill discount.
+            LineItem("CFE-WB-5LB", "Whole-bean coffee, 5lb bags",        40, 60.00),
+            LineItem("TEA-ASRT",   "Assorted tea variety packs",         12, 40.00),
+            LineItem("MILK-OAT",   "Oat milk cartons (case of 12)",       8, 40.00),
+            LineItem(
+                "CR-SPOIL-04",
+                "Partial refund: spoiled milk on 04/18 delivery",
+                -1, 160.00,
+            ),
+            LineItem(
+                "DISC-LOYAL",
+                "Loyalty discount (5% on coffee + tea)",
+                -1, 144.00,
+            ),
+        ],
+        tax_rate=0.06,
+        tax_label="MA meals tax",
+        # Net pre-tax = 3200 - 160 - 144 = 2,896.00
+        # Tax = 173.76. Total = 3,069.76 — these printed values are CORRECT.
+        notes=[
+            "Partial refund of $160 reflects spoiled oat-milk delivery on "
+            "2026-04-18 (driver report attached separately).",
+            "5% loyalty discount applied to coffee + tea per pricing rider.",
+            "2/10 net 30: pay within 10 days for an additional 2% off.",
+        ],
+        email_subject="Northwind Coffee — May invoice w/ partial refund + loyalty discount",
+        email_from_name="Renee Carter",
+        email_from_addr="renee.carter@northwind-coffee.example",
+        email_body=(
+            "Hi Harborview AP,\n\n"
+            "Attached is invoice NOC-2026-04-0917 for May supplies under "
+            "PO HARBORVIEW-PO-2026-77 (Net 30, 2/10 net 30).\n\n"
+            "Two adjustments to flag explicitly so they don't get lost:\n"
+            "  1. Partial refund of $160 for the spoiled oat-milk on the "
+            "     04/18 delivery (driver report attached separately).\n"
+            "  2. Loyalty discount of 5% applied to coffee + tea per the "
+            "     pricing rider — visible as a negative line on the PDF.\n\n"
+            "If you pay within 10 days you get an additional 2% off "
+            "automatically — system will reconcile on receipt.\n\n"
+            "Thanks,\n"
+            "Renee Carter · Northwind Office Coffee & Pantry"
+        ),
+        sent_at="2026-05-01T08:25:00-04:00",
+        image_mode="text_only",
+    ),
+    InvoiceSpec(
+        case_dir="case_27_tax_rate_label_mismatch",
+        vendor="Cascade Web Services Ltd.",
+        vendor_address="221 King St W, Toronto, ON M5V 1J5, Canada · GST/HST 87654 3210 RT0001",
+        invoice_number="CWS-2026-Q2-0042",
+        invoice_date="2026-05-09",
+        due_date="2026-06-08",
+        terms="Net 30",
+        currency="CAD",
+        currency_symbol="$",
+        po_number="LAKEFRONT-PO-2026-018",
+        bill_to=(
+            "Lakefront Realty Group, 100 Queens Quay E, "
+            "Toronto, ON M5E 1V3"
+        ),
+        ship_to=["Services delivered remotely (SaaS — no shipment)"],
+        line_items=[
+            # Subtotal: 1800 + 600 + 240 = 2,640.00
+            # CORRECT 13% HST = 343.20  ->  CORRECT total = 2,983.20
+            LineItem("HOSTING-PROD", "Managed hosting — production tier (monthly)", 1, 1800.00),
+            LineItem("HOSTING-STG",  "Managed hosting — staging tier (monthly)",    1,  600.00),
+            LineItem("BACKUP-OFFS",  "Off-site backup retention (90d)",             1,  240.00),
+        ],
+        # Internally-correct tax rate is 13% (ON HST). The PRINTED
+        # rate on the PDF says "5% GST" but the printed amount actually
+        # equals the 13% HST figure — classic copy/paste mistake.
+        tax_rate=0.13,
+        tax_label="Sales tax",
+        override_tax_rate_label="(5% GST)",
+        # Printed amounts use the CORRECT 13% values, but the LABEL
+        # says 5% — agent must flag tax_rate_mismatch / wrong_tax_label.
+        notes=[
+            "Tax line is labelled '5% GST' on this invoice but the "
+            "amount reflects 13% Ontario HST — please confirm the "
+            "correct rate before posting; we will reissue if wrong.",
+            "Services rendered remotely; no physical delivery.",
+        ],
+        email_subject="Cascade Web Services — Q2 hosting invoice (tax label looks wrong)",
+        email_from_name="Devon Ng",
+        email_from_addr="devon.ng@cascade-web.example",
+        email_body=(
+            "Hi Lakefront AP,\n\n"
+            "Attached is invoice CWS-2026-Q2-0042 for the Q2 managed "
+            "hosting + backup retention under PO LAKEFRONT-PO-2026-018 "
+            "(Net 30).\n\n"
+            "Quick disclosure: the tax line on the PDF is labelled "
+            "'5% GST' but the dollar amount actually reflects Ontario "
+            "HST at 13% (which is what your account is registered for). "
+            "Please treat the printed AMOUNT as authoritative — we will "
+            "reissue with the correct LABEL on the next billing run. "
+            "Flag it on your side too so the GL posts to the right "
+            "tax account.\n\n"
+            "Thanks,\n"
+            "Devon Ng · Cascade Web Services Ltd."
+        ),
+        sent_at="2026-05-09T11:00:00-04:00",
+        image_mode="text_only",
+    ),
+    InvoiceSpec(
+        case_dir="case_28_terms_due_date_conflict",
+        vendor="Harbor & Pike Marketing Studio",
+        vendor_address="450 Wharf Ave, Portland, ME 04101 · EIN 22-1188440",
+        invoice_number="HPM-INV-2026-0214",
+        invoice_date="2026-05-10",
+        # CONFLICT: terms say "Net 30" but printed due date is only ~5 days out.
+        due_date="2026-05-15",
+        terms="Net 30",
+        currency="USD",
+        currency_symbol="$",
+        po_number="PINEFIELD-PO-2026-031",
+        bill_to=(
+            "Pinefield Restaurant Group, 88 Commercial St, "
+            "Portland, ME 04101"
+        ),
+        ship_to=["Deliverables emailed (campaign assets) — no shipment"],
+        line_items=[
+            # Subtotal: 4500 + 1200 + 800 = 6,500
+            # No state sales tax on services in ME for this category.
+            LineItem("BR-CAMP-Q2", "Q2 brand campaign — strategy + creative", 1, 4500.00),
+            LineItem("PHOTO-DAY",  "On-site photo day (full day, 1 location)", 1, 1200.00),
+            LineItem("COPY-WEB",   "Web copy refresh — 8 pages",               8,  100.00),
+        ],
+        tax_rate=0.0,
+        tax_label="No tax (services exempt in ME)",
+        discount=500.00,
+        discount_label="Loyalty credit (returning client)",
+        # Pre-tax: 6500 - 500 = 6,000 ; tax 0 ; total = 6,000.00. Math is correct.
+        notes=[
+            "Terms printed as 'Net 30' but the due-date field on the PDF "
+            "shows 2026-05-15 (only 5 days out). One of them is wrong — "
+            "please confirm which before scheduling payment.",
+            "Loyalty credit of $500 already applied as a negative line.",
+            "Photo-day rescheduled from 04/29 to 05/06 at no extra charge.",
+        ],
+        email_subject="Harbor & Pike — Q2 marketing invoice (terms vs due date conflict)",
+        email_from_name="Tasha Bowman",
+        email_from_addr="tasha.bowman@harborpike.example",
+        email_body=(
+            "Hi Pinefield AP,\n\n"
+            "Attached is invoice HPM-INV-2026-0214 for the Q2 brand "
+            "campaign (strategy + creative + photo day + web copy "
+            "refresh) under PO PINEFIELD-PO-2026-031.\n\n"
+            "Heads-up — the terms on the PDF say 'Net 30' but the "
+            "due-date field shows 2026-05-15 (only 5 days from invoice "
+            "date). That's a template bug on our side. Please treat "
+            "Net 30 as authoritative (real due date is 2026-06-09); "
+            "I'll reissue a clean copy if you need it for audit.\n\n"
+            "$500 loyalty credit already applied as a negative line. "
+            "No sales tax — services category is ME-exempt.\n\n"
+            "Thanks for the patience,\n"
+            "Tasha Bowman · Harbor & Pike Marketing Studio"
+        ),
+        sent_at="2026-05-10T13:20:00-04:00",
+        image_mode="landscape_panorama",
+        showcase=ShowcaseStyle(
+            primary=(0.10, 0.30, 0.45),
+            accent=(0.80, 0.55, 0.20),
+            soft=(0.96, 0.96, 0.94),
+        ),
     ),
 ]
 

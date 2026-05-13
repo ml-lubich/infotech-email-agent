@@ -12,6 +12,155 @@ This project is pre-1.0; minor versions may include breaking changes.
 
 ## [Unreleased]
 
+### Changed
+- **CLI now activates LLM verifier shots in production.** `cli.main` builds an
+  `OpenAI()` client and injects it into `run_intake(openai_client=...)` so
+  shots 3 (`critic_review`, `gpt-5-nano`) and 4 (`injection_screen`,
+  `gpt-5-nano`) actually fire on every real run instead of being SKIPPED.
+  Opt-out via `INVOICE_PIPELINE_LLM_DISABLED=1` (used by the test suite).
+- **`VerificationReport.field_confidence` schema:** `dict[str, ConfidenceLevel]`
+  → `list[FieldScore]` (with `field`, `level`). OpenAI Structured Outputs
+  rejects open-ended dict types; this fix unblocks `responses.parse`. New
+  exported model `verifier.FieldScore`. Per-shot decision log unchanged
+  (`high=K medium=K low=K disagreements=N`).
+- New tests in `tests/test_pipeline_activation.py` (6) covering CLI client
+  construction, opt-out env var, soft fallback when client constructor fails,
+  shots firing when client is provided, SKIPPED status when not, and FAIL
+  recording (no silent fallback) when the verifier raises.
+
+### Added
+- **Multi-shot orchestration pipeline with progressive confidence**
+  (`invoice_agent/pipeline.py`). `run_intake` now runs a 6-stage pipeline
+  around the existing agent and emits one structured log line per shot:
+
+      shot=<n> name=<name> kind=<deterministic|llm> model=<m|->
+      decision=<PASS|FLAG|FAIL|SKIPPED>
+      confidence_before=X.XX delta=±Y.YY confidence_after=Z.ZZ
+      findings=[...]
+
+  Shots:
+    0. `pre_flight`        — deterministic email scan + attachment check.
+    1. `extract`           — LLM (vision) observation, recorded from the
+                             agent's emitted payload (no extra LLM call).
+    2. `arithmetic_check`  — deterministic math + format checks
+                             (`guardrails.arithmetic_check`).
+    3. `critic_review`     — LLM (gpt-5-nano) `verifier.verify_extraction`
+                             with structured `VerificationReport`
+                             (per-field confidence + disagreements).
+                             SKIPPED when no `openai_client` is injected.
+    4. `injection_screen`  — LLM (gpt-5-nano) `verifier.injection_screen`.
+                             SKIPPED when no client is injected.
+    5. `synthesis_finalise` — deterministic rewrite of outbound files
+                              with the confidence banner + envelope.
+
+  The score starts at `0.50` and is clamped to `[0.0, 1.0]`. Final
+  confidence + per-shot trail land in two places:
+    - `outbound_email.json` → new `pipeline` envelope:
+      `{confidence, flag_count, shots: [...]}` (one record per shot).
+    - `outbound_email.txt` → one-line banner at the top:
+      `Confidence: 0.65 — 5 shots, 2 flag(s)`.
+
+- New module `invoice_agent/verifier.py` (TDD-spec'd):
+  `VerificationReport`, `Disagreement`, `verify_extraction`,
+  `injection_screen`. Independent reviewer; never re-extracts; only
+  annotates. Allow-listed via `models.resolve_model`.
+- `guardrails.arithmetic_check(payload)` — deterministic finding tags
+  (`totals_inconsistent`, `line_items_sum_mismatch`,
+  `currency_not_iso_4217`, `invoice_date_unparseable`,
+  `due_date_unparseable`, `negative_total_due`).
+- New tests: `tests/test_pipeline.py` (26) + `tests/test_verifier.py` (10)
+  covering confidence math, every shot decision branch, FAIL paths,
+  finalise idempotency, unreadable-JSON defence, LLM injection screen.
+- `INVOICE_CRITIC_MODEL` env override for the verifier model.
+
+### Changed
+- `agent.run_intake` is now a pipeline driver; the synthesis agent
+  remains responsible for the customer-facing summary and the notify
+  call, and the pipeline augments its output with confidence + flags.
+- "Tools called once" invariant in `docs/ARCHITECTURE.md` replaced by
+  "each shot runs at most once per run".
+
+### Added (previous, kept under `[Unreleased]` until release)
+- **Deterministic prompt-injection guardrails** (`invoice_agent/guardrails.py`).
+  Defense-in-depth layer for the small-model constraint (`gpt-5-mini` /
+  `gpt-5-nano`):
+  - **Input guardrail**: `run_intake` now regex-scans the raw email body
+    before any LLM call and publishes the detected tags via the
+    `INVOICE_INJECTION_SIGNALS` env var. Detects
+    `ignore_prior_instructions`, `role_redefinition`, `fake_role_marker`
+    (`### system`, `<|im_start|>`, `[INST]`…), `auto_approve_directive`,
+    `payment_redirection`.
+  - **Output guardrail**: the notify tool reads those signals and, before
+    writing `outbound_email.{txt,json}`, additively forces
+    `prompt_injection_attempt_in_document` into `payload.risk_flags` when
+    the input scan fired — even if a jailbroken model omitted it. Also
+    scans the AP-facing summary for auto-approval / skip-checks language;
+    on hit, appends a visible `[GUARDRAIL]` banner and adds
+    `output_guardrail_triggered` to `risk_flags`. Existing flags are
+    never removed.
+  - 27 new tests in `tests/test_guardrails.py` (TDD: written failing
+    first, then implementation landed). Coverage: `guardrails.py` 98%,
+    `agent.py` and `tools.py` remain 100%.
+
+### Added
+- **Local OCR fallback** (`rapidocr-onnxruntime`) in `pdf_extract`. When a
+  PDF page yields fewer than ~200 non-whitespace characters of native text
+  (e.g. fully-scanned invoices, image-only PDFs, or pages whose text layer
+  is just a "[scanned image]" placeholder), the extractor now rasterizes
+  the page at 2× and runs PP-OCR locally via ONNX Runtime, appending the
+  recovered text to the page. Recovered text is then handed to the
+  vision-LLM extraction step instead of forcing the model to re-read the
+  same scan, keeping OpenAI vision tokens efficient. The OCR engine is
+  loaded lazily and cached as a singleton; if the dependency or model
+  init fails, extraction degrades gracefully back to native text + the
+  vision call (no hard failure).
+- `PdfContent.ocr_pages: list[int]` records which page indices were
+  recovered via the OCR fallback (visible in logs and tests).
+- `tests/test_pdf_extract_ocr.py` covers three scenarios with REAL OCR
+  (no mocks): (1) a synthesized pixel-only PDF where OCR must recover a
+  recognizable substring; (2) the engine-unavailable degradation branch;
+  (3) the real `examples/case_11_scanned_full_page/Invoice.pdf` fixture
+  (scan-only, no copyable text) — asserts OCR fires and recovers vendor
+  name (`CASCADIA`), invoice number (`CLI-2026-LAB-0512`), and currency
+  (`USD`).
+
+### Fixed
+- Invoice generator (`scripts/generate_examples.py`) totals panel:
+  long tax labels (e.g. "No tax (sole proprietor, services only)") no
+  longer collide with the right-aligned amount column. Subtotal / tax /
+  TOTAL DUE rows are now rendered as right-aligned `insert_textbox`
+  panels (label box 50–482, amount box 486–562), so any label fits on
+  one line without overlapping the amount. Regenerated all fixtures
+  under `examples/`.
+
+### Added
+- Comprehensive **decision-trail logging** across the run lifecycle (CLI →
+  agent → tools). The per-run `run.log` now captures, in order:
+  - CLI startup banner: cwd, email/PDF args, resolved out_dir, resolved
+    log file, model selection (env + effective).
+  - Email parsing decisions: sender, subject, attachment list, body
+    preview, optional `PO_hint`.
+  - PDF resolution decision: `auto` (chosen attachment) vs `explicit`,
+    plus existence + size check.
+  - Extraction step: PDF page count, text length, image count + dims,
+    extraction model, and a structured summary of the parsed payload
+    (vendor, invoice number, currency, totals, line/tax/ship counts).
+    Risk flags and source warnings are logged at WARNING level so they
+    stand out in the trail.
+  - Notification step: payload size, vendor/invoice/PO/sender_domain
+    snapshot, forwarded `risk_flags` and `source_warnings` (WARNING),
+    and the artefact paths written.
+  - Post-run agent decision walk: every tool call (name + truncated
+    arguments), every tool output (truncated, paired by `call_id`),
+    assistant messages, reasoning items, plus turn count and the final
+    reply preview.
+- Third-party HTTP noise (`httpx`, `openai`) raised to WARNING so the
+  decision trail is easy to read end-to-end.
+- `tests/test_decision_logging.py` — coverage for the new
+  `agent._log_run_decisions` walker (all SDK item kinds, truncation,
+  empty-result fallback) and the `tools` notify decision branches.
+  Total coverage remains 100%.
+
 ### Added
 - Five new fixture cases exercising additional invoice **layouts**, **terms**
   and **currencies** (`scripts/generate_examples.py`):
@@ -32,6 +181,28 @@ This project is pre-1.0; minor versions may include breaking changes.
   `shipping`, `signature_name` to drive them.
 - `scripts/verify_outputs.py` default case list extended to include the
   five new cases.
+- Five additional edge-case fixtures stress-testing arithmetic /
+  refund / tax / terms anomalies (the agent should surface these in
+  `risk_flags`):
+  - `case_24_wrong_total_arithmetic` — printed subtotal AND printed
+    total disagree with the line items (`override_printed_subtotal`,
+    `override_printed_total`). Expect `totals_inconsistent`.
+  - `case_25_credit_memo_refund` — full credit memo with NEGATIVE line
+    totals and "DO NOT PAY" instructions; tests that the agent does
+    not treat a credit as an invoice for payment.
+  - `case_26_partial_refund_discount` — mixes a partial-refund line
+    (spoiled goods) with a loyalty discount line and a 2/10 net 30
+    early-pay term.
+  - `case_27_tax_rate_label_mismatch` — printed tax LABEL says
+    "5% GST" but the AMOUNT reflects 13% Ontario HST. Uses new
+    `override_tax_rate_label` field. Expect `tax_rate_mismatch`.
+  - `case_28_terms_due_date_conflict` — terms field says "Net 30" but
+    the printed due date is only 5 days out; agent must flag the
+    inconsistency.
+- New `InvoiceSpec` override fields powering the above:
+  `override_printed_subtotal`, `override_printed_tax`,
+  `override_printed_total`, `override_tax_rate_label`. The renderers
+  (`text_only`, `minimal_portrait`, `landscape_panorama`) honour them.
 
 ### Added
 - Prompt-injection hardening: both the agent (`src/invoice_agent/agent.py`)

@@ -14,6 +14,8 @@ ALLOWED_MODELS: Final[frozenset[str]] = frozenset({"gpt-5-mini", "gpt-5-nano"})
 
 DEFAULT_AGENT_MODEL: Final[str] = "gpt-5-mini"
 DEFAULT_EXTRACT_MODEL: Final[str] = "gpt-5-mini"
+# Critic + injection-screen pipeline shots: prefer the cheaper nano model.
+DEFAULT_CRITIC_MODEL: Final[str] = "gpt-5-nano"
 
 
 def resolve_model(candidate: str | None, default: str) -> str:

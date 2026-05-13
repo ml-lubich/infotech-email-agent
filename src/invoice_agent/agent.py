@@ -1,16 +1,29 @@
-"""Agents SDK wiring for the invoice intake workflow."""
+"""Agents SDK wiring for the invoice intake workflow.
+
+Behaviourally identical to the previous procedural module: same public
+surface (``run_intake``, ``IntakeResult``, ``build_agent``), same log
+strings, same artefact layout. Internally decomposed into small
+collaborating objects so each method does one thing.
+"""
 
 from __future__ import annotations
 
 import json
 import logging
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Callable
 
 from agents import Agent, Runner
 
+from invoice_agent.evidence import (
+    quote_for_arithmetic,
+    quote_for_disagreement,
+    quote_for_low_confidence,
+    quote_for_regex_finding,
+    quotes_for_email_injection,
+)
 from invoice_agent.guardrails import (
     arithmetic_check,
     publish_injection_signals,
@@ -23,11 +36,13 @@ from invoice_agent.models import (
 )
 from invoice_agent.pdf_extract import extract_pdf_content
 from invoice_agent.pipeline import PipelineState
+from invoice_agent.schema import Evidence
 from invoice_agent.tools import (
     OUT_DIR_ENV,
     extract_invoice_from_pdf,
     send_customer_service_notification,
 )
+from invoice_agent.usage import UsageMeter, extract_usage, read_extract_usage
 from invoice_agent.verifier import injection_screen, verify_extraction
 
 if TYPE_CHECKING:
@@ -123,279 +138,230 @@ def run_intake(
 ) -> IntakeResult:
     """Run the agent against an email JSON file and its PDF attachment.
 
-    Args:
-        email_path: Path to the inbound email JSON file.
-        pdf_path: Path to the invoice PDF. If None, resolved from the email's
-            ``Attachments`` array (looking for a sibling ``*.pdf``).
-        out_dir: Directory to write ``outbound_email.{txt,json}``.
-        openai_client: Optional pre-built OpenAI client used by the LLM
-            pipeline shots (``critic_review`` and ``injection_screen``).
-            When ``None``, those two shots are recorded as ``SKIPPED`` and
-            the pipeline still produces a confidence score from the
-            deterministic shots.
-
-    Returns:
-        IntakeResult with the agent's final text and the written artifacts.
+    Thin facade that delegates to ``_IntakeRun.execute`` so this module's
+    public surface stays unchanged. See ``_IntakeRun`` for the actual
+    pipeline orchestration.
     """
-    email_path = email_path.expanduser().resolve()
-    if not email_path.is_file():
-        raise FileNotFoundError(f"Email file not found: {email_path}")
+    return _IntakeRun(
+        email_path=email_path,
+        pdf_path=pdf_path,
+        out_dir=out_dir,
+        openai_client=openai_client,
+    ).execute()
 
-    email_data = json.loads(email_path.read_text(encoding="utf-8"))
-    message = email_data.get("Message", email_data)
 
-    # --- Decision trail: what we read from the email ----------------------
-    sender = message.get("From") or message.get("Sender") or "(unknown)"
-    subject = message.get("Subject") or "(no subject)"
-    attachments = message.get("Attachments", []) or []
-    att_names = [a.get("Name") or "(unnamed)" for a in attachments]
-    _body_raw = message.get("Body") or message.get("BodyText") or ""
-    if isinstance(_body_raw, dict):
-        _body_raw = _body_raw.get("Content") or _body_raw.get("Text") or ""
-    body_preview = str(_body_raw)[:200].replace("\n", " ")
-    log.info("email parsed sender=%r subject=%r attachments=%s", sender, subject, att_names)
-    if body_preview:
-        log.info("email body_preview=%r", body_preview)
-    if message.get("PO") or message.get("PONumber"):
-        log.info("email PO_hint=%r", message.get("PO") or message.get("PONumber"))
+# =====================================================================
+#  Email parsing
+# =====================================================================
 
-    explicit_pdf = pdf_path is not None
-    if pdf_path is None:
-        pdf_name = next(
-            (
-                a.get("Name")
-                for a in attachments
-                if (a.get("Name") or "").lower().endswith(".pdf")
-            ),
-            None,
-        )
-        if not pdf_name:
-            log.error("decision pdf_resolution=FAILED reason=no_pdf_in_attachments names=%s", att_names)
-            raise ValueError("No PDF attachment found in email.")
-        pdf_path = (email_path.parent / pdf_name).resolve()
-        log.info("decision pdf_resolution=auto chose=%r path=%s", pdf_name, pdf_path)
-    else:
-        log.info("decision pdf_resolution=explicit path=%s", pdf_path)
 
-    pdf_path = pdf_path.expanduser().resolve()
-    if not pdf_path.is_file():
-        log.error("decision pdf_check=MISSING path=%s explicit=%s", pdf_path, explicit_pdf)
-        raise FileNotFoundError(f"PDF attachment not found: {pdf_path}")
-    log.info("pdf check=OK size_bytes=%d path=%s", pdf_path.stat().st_size, pdf_path)
+@dataclass(frozen=True)
+class _ParsedEmail:
+    sender: str
+    subject: str
+    attachments: list[dict[str, object]]
+    body_text: str
+    po_hint: object | None
+    message: dict[str, object]
 
-    out_dir = out_dir.expanduser().resolve()
-    out_dir.mkdir(parents=True, exist_ok=True)
-    # Tools read this env var to route artifacts; scoped to this run.
-    os.environ[OUT_DIR_ENV] = str(out_dir)
-    log.info("agent model=%s out_dir_env=%s=%s", _AGENT_MODEL, OUT_DIR_ENV, out_dir)
 
-    # ====================================================================
-    # MULTI-SHOT PIPELINE — see docs/ARCHITECTURE.md "Multi-shot pipeline".
-    # Each shot updates `state.confidence` and emits a structured log line.
-    # ====================================================================
-    state = PipelineState()
+def _coerce_body(raw: object) -> str:
+    if isinstance(raw, dict):
+        raw = raw.get("Content") or raw.get("Text") or ""
+    return str(raw) if raw else ""
 
-    # --- Shot 0 — pre_flight (deterministic) ---------------------------
-    body_text = str(_body_raw) if _body_raw else ""
-    pre_findings = scan_for_injection(body_text)
-    if not attachments:
-        pre_findings.append("no_attachments_in_email")
-    publish_injection_signals(pre_findings)
-    state.record(
-        name="pre_flight",
-        kind="deterministic",
-        model="",
-        findings=pre_findings,
+
+def _parse_email_message(message: dict[str, object]) -> _ParsedEmail:
+    attachments_raw = message.get("Attachments") or []
+    attachments = list(attachments_raw) if isinstance(attachments_raw, list) else []
+    return _ParsedEmail(
+        sender=str(message.get("From") or message.get("Sender") or "(unknown)"),
+        subject=str(message.get("Subject") or "(no subject)"),
+        attachments=attachments,
+        body_text=_coerce_body(message.get("Body") or message.get("BodyText") or ""),
+        po_hint=message.get("PO") or message.get("PONumber"),
+        message=message,
     )
 
-    user_prompt = (
-        "Inbound email JSON (verbatim):\n"
-        f"{json.dumps(message, ensure_ascii=False)}\n\n"
-        f"The PDF attachment is available locally at: {pdf_path}\n"
-        "Run the intake workflow."
-    )
-    log.info("agent invoking Runner.run_sync prompt_chars=%d", len(user_prompt))
 
-    agent = build_agent()
-    result = Runner.run_sync(agent, user_prompt)
-    _log_run_decisions(result)
-
-    # ----- Post-agent shots: read what the agent emitted, augment ------
-    out_json_path = out_dir / "outbound_email.json"
-    out_txt_path = out_dir / "outbound_email.txt"
-
-    payload: dict[str, object] = {}
-    if out_json_path.is_file():
-        try:
-            payload = json.loads(out_json_path.read_text(encoding="utf-8"))
-            if not isinstance(payload, dict):
-                payload = {}
-        except (OSError, json.JSONDecodeError) as exc:
-            log.warning("post-agent: cannot read outbound_email.json: %s", exc)
-            payload = {}
-
-    # --- Shot 1 — extract observation (LLM, no extra call) -------------
-    extract_findings: list[str] = []
-    if not payload:
-        extract_findings.append("no_payload_emitted")
-    else:
-        if not payload.get("invoice_number"):
-            extract_findings.append("missing_invoice_number")
-        if payload.get("total_due") is None:
-            extract_findings.append("missing_total_due")
-    state.record(
-        name="extract",
-        kind="llm",
-        model=os.getenv("INVOICE_EXTRACT_MODEL") or "gpt-5-mini",
-        findings=extract_findings,
-    )
-
-    # --- Shot 2 — arithmetic_check (deterministic) ---------------------
-    arith_findings = arithmetic_check(payload) if payload else []
-    state.record(
-        name="arithmetic_check",
-        kind="deterministic",
-        model="",
-        findings=arith_findings,
-    )
-
-    # --- Shot 3 — critic_review (LLM nano; SKIPPED if no client) -------
-    if openai_client is None:
-        state.skip("critic_review", "llm", _CRITIC_MODEL, reason="no_openai_client")
-    else:
-        try:
-            raw_pdf_text = extract_pdf_content(pdf_path).text
-            report = verify_extraction(
-                payload_json=json.dumps(payload, ensure_ascii=False),
-                pdf_text=raw_pdf_text,
-                client=openai_client,
-                model=_CRITIC_MODEL,
-            )
-            critic_findings: list[str] = []
-            for d in report.disagreements:
-                critic_findings.append(f"verifier_disagreement_{d.field}")
-            for score in report.field_confidence:
-                if score.level == "low":
-                    critic_findings.append(f"low_confidence_{score.field}")
-            state.record("critic_review", "llm", _CRITIC_MODEL, critic_findings)
-        except Exception as exc:  # noqa: BLE001 — recorded as FAIL, not silent
-            log.warning("critic_review FAILED: %s", exc)
-            state.fail("critic_review", "llm", _CRITIC_MODEL, str(exc)[:120])
-
-    # --- Shot 4 — injection_screen (LLM nano; SKIPPED if no client) ----
-    if openai_client is None:
-        state.skip("injection_screen", "llm", _CRITIC_MODEL, reason="no_openai_client")
-        inj_llm_findings: list[str] = []
-    else:
-        try:
-            raw_pdf_text2 = extract_pdf_content(pdf_path).text
-            inj_llm_findings = injection_screen(
-                text=f"{body_text}\n---\n{raw_pdf_text2}",
-                client=openai_client,
-                model=_CRITIC_MODEL,
-            )
-            state.record("injection_screen", "llm", _CRITIC_MODEL, inj_llm_findings)
-        except Exception as exc:  # noqa: BLE001 — recorded as FAIL, not silent
-            log.warning("injection_screen FAILED: %s", exc)
-            state.fail("injection_screen", "llm", _CRITIC_MODEL, str(exc)[:120])
-            inj_llm_findings = []
-
-    # --- Shot 5 — synthesis_finalise (deterministic rewrite) -----------
-    # Compute findings FIRST so the envelope embeds shot 5 itself.
-    artefacts_present = out_txt_path.is_file() and out_json_path.is_file()
-    finalise_findings: list[str] = [] if artefacts_present else ["no_outbound_artifacts"]
-    state.record(
-        name="synthesis_finalise",
-        kind="deterministic",
-        model="",
-        findings=finalise_findings,
-    )
-    if artefacts_present:
-        _finalise_outbound(
-            out_txt_path=out_txt_path,
-            out_json_path=out_json_path,
-            payload=payload,
-            state=state,
-        )
-    else:
-        log.warning(
-            "synthesis_finalise: missing artifacts txt=%s json=%s — skipping rewrite",
-            out_txt_path.is_file(),
-            out_json_path.is_file(),
-        )
-
+def _log_parsed_email(email: _ParsedEmail) -> None:
+    names = [a.get("Name") or "(unnamed)" for a in email.attachments]
     log.info(
-        "pipeline complete confidence=%.2f shots=%d flags=%d",
-        state.confidence,
-        len(state.shots),
-        state.flag_count(),
+        "email parsed sender=%r subject=%r attachments=%s",
+        email.sender, email.subject, names,
     )
-
-    return IntakeResult(
-        agent_reply=result.final_output or "",
-        artifacts={
-            "outbound_email.txt": out_dir / "outbound_email.txt",
-            "outbound_email.json": out_dir / "outbound_email.json",
-        },
-    )
+    preview = email.body_text[:200].replace("\n", " ")
+    if preview:
+        log.info("email body_preview=%r", preview)
+    if email.po_hint:
+        log.info("email PO_hint=%r", email.po_hint)
 
 
-def _log_run_decisions(result: object) -> None:
-    """Walk the Agents SDK RunResult and emit a compact decision trail.
+# =====================================================================
+#  PDF resolution
+# =====================================================================
 
-    Captures every tool call (name + truncated arguments), every tool
-    output (truncated), assistant messages, and turn count. Defensive
-    against test stand-ins that only expose ``final_output``.
-    """
-    new_items = getattr(result, "new_items", None) or []
-    raw_responses = getattr(result, "raw_responses", None) or []
-    log.info("agent run completed turns=%d items=%d", len(raw_responses), len(new_items))
 
-    tool_calls: dict[str, str] = {}
-    for idx, item in enumerate(new_items):
+def _find_pdf_attachment(attachments: list[dict[str, object]]) -> str | None:
+    for a in attachments:
+        name = a.get("Name") or ""
+        if isinstance(name, str) and name.lower().endswith(".pdf"):
+            return name
+    return None
+
+
+def _resolve_pdf_path(
+    email_path: Path,
+    explicit: Path | None,
+    attachments: list[dict[str, object]],
+) -> Path:
+    if explicit is not None:
+        log.info("decision pdf_resolution=explicit path=%s", explicit)
+        return explicit.expanduser().resolve()
+
+    name = _find_pdf_attachment(attachments)
+    if not name:
+        att_names = [a.get("Name") or "(unnamed)" for a in attachments]
+        log.error(
+            "decision pdf_resolution=FAILED reason=no_pdf_in_attachments names=%s",
+            att_names,
+        )
+        raise ValueError("No PDF attachment found in email.")
+
+    resolved = (email_path.parent / name).resolve()
+    log.info("decision pdf_resolution=auto chose=%r path=%s", name, resolved)
+    return resolved
+
+
+# =====================================================================
+#  Run-decision logging (Agents SDK RunResult walker)
+# =====================================================================
+
+
+def _truncate(text: str, limit: int) -> str:
+    if len(text) <= limit:
+        return text
+    return text[:limit] + f"...[+{len(text) - limit} chars]"
+
+
+class _RunDecisionLogger:
+    """Walks an Agents SDK ``RunResult`` and emits a compact decision trail."""
+
+    _ARG_LIMIT = 600
+    _OUT_LIMIT = 600
+    _MSG_LIMIT = 400
+    _FINAL_LIMIT = 400
+
+    def __init__(self, result: object) -> None:
+        self._result = result
+        self._tool_calls: dict[str, str] = {}
+
+    def emit(self) -> None:
+        new_items = getattr(self._result, "new_items", None) or []
+        raw_responses = getattr(self._result, "raw_responses", None) or []
+        log.info(
+            "agent run completed turns=%d items=%d",
+            len(raw_responses), len(new_items),
+        )
+        for idx, item in enumerate(new_items):
+            self._dispatch(idx, item)
+        self._log_final_reply()
+
+    def _dispatch(self, idx: int, item: object) -> None:
         kind = type(item).__name__
         # Duck-type by suffix so this works against the real SDK classes
         # AND against test stand-ins that mirror the shape.
-        if kind.endswith("ToolCallItem"):
-            name = getattr(item, "tool_name", None) or "(unknown)"
-            call_id = getattr(item, "call_id", None) or f"#{idx}"
-            raw = getattr(item, "raw_item", None)
-            args = ""
-            if isinstance(raw, dict):
-                args = str(raw.get("arguments") or "")
-            else:
-                args = str(getattr(raw, "arguments", "") or "")
-            preview = args if len(args) <= 600 else args[:600] + f"...[+{len(args) - 600} chars]"
-            tool_calls[call_id] = name
-            log.info("decision tool_call name=%s call_id=%s args=%s", name, call_id, preview)
-        elif kind.endswith("ToolCallOutputItem"):
-            call_id = getattr(item, "call_id", None) or f"#{idx}"
-            name = tool_calls.get(call_id, "(unknown)")
-            output = getattr(item, "output", "")
-            text = output if isinstance(output, str) else json.dumps(output, ensure_ascii=False, default=str)
-            preview = text if len(text) <= 600 else text[:600] + f"...[+{len(text) - 600} chars]"
-            log.info("decision tool_output name=%s call_id=%s output=%s", name, call_id, preview)
-        elif kind.endswith("MessageOutputItem"):
-            raw = getattr(item, "raw_item", None)
-            text_parts: list[str] = []
-            content = getattr(raw, "content", None) or []
-            for part in content:
-                t = getattr(part, "text", None)
-                if t:
-                    text_parts.append(t)
-            msg = " ".join(text_parts).strip()
-            if msg:
-                preview = msg if len(msg) <= 400 else msg[:400] + f"...[+{len(msg) - 400} chars]"
-                log.info("decision assistant_message text=%r", preview)
-        elif kind.endswith("ReasoningItem"):
-            log.info("decision reasoning_item idx=%d (opaque)", idx)
-        else:
-            log.info("decision item kind=%s idx=%d", kind, idx)
+        handlers: dict[str, Callable[[int, object], None]] = {
+            "ToolCallItem": self._on_tool_call,
+            "ToolCallOutputItem": self._on_tool_output,
+            "MessageOutputItem": self._on_message,
+            "ReasoningItem": self._on_reasoning,
+        }
+        for suffix, handler in handlers.items():
+            if kind.endswith(suffix):
+                handler(idx, item)
+                return
+        log.info("decision item kind=%s idx=%d", kind, idx)
 
-    final = getattr(result, "final_output", None) or ""
-    if final:
-        preview = final if len(final) <= 400 else final[:400] + f"...[+{len(final) - 400} chars]"
-        log.info("agent final_reply=%r", preview)
+    def _on_tool_call(self, idx: int, item: object) -> None:
+        name = getattr(item, "tool_name", None) or "(unknown)"
+        call_id = getattr(item, "call_id", None) or f"#{idx}"
+        raw = getattr(item, "raw_item", None)
+        args = (
+            str(raw.get("arguments") or "")
+            if isinstance(raw, dict)
+            else str(getattr(raw, "arguments", "") or "")
+        )
+        self._tool_calls[call_id] = name
+        log.info(
+            "decision tool_call name=%s call_id=%s args=%s",
+            name, call_id, _truncate(args, self._ARG_LIMIT),
+        )
+
+    def _on_tool_output(self, idx: int, item: object) -> None:
+        call_id = getattr(item, "call_id", None) or f"#{idx}"
+        name = self._tool_calls.get(call_id, "(unknown)")
+        output = getattr(item, "output", "")
+        text = (
+            output if isinstance(output, str)
+            else json.dumps(output, ensure_ascii=False, default=str)
+        )
+        log.info(
+            "decision tool_output name=%s call_id=%s output=%s",
+            name, call_id, _truncate(text, self._OUT_LIMIT),
+        )
+
+    def _on_message(self, _idx: int, item: object) -> None:
+        raw = getattr(item, "raw_item", None)
+        content = getattr(raw, "content", None) or []
+        parts = [getattr(p, "text", None) for p in content]
+        msg = " ".join(t for t in parts if t).strip()
+        if msg:
+            log.info(
+                "decision assistant_message text=%r",
+                _truncate(msg, self._MSG_LIMIT),
+            )
+
+    def _on_reasoning(self, idx: int, _item: object) -> None:
+        log.info("decision reasoning_item idx=%d (opaque)", idx)
+
+    def _log_final_reply(self) -> None:
+        final = getattr(self._result, "final_output", None) or ""
+        if final:
+            log.info(
+                "agent final_reply=%r",
+                _truncate(final, self._FINAL_LIMIT),
+            )
+
+
+def _log_run_decisions(result: object) -> None:
+    """Module-level shim retained for backwards-compat with anything that
+    imports the function name directly. Tests can still monkeypatch it."""
+    _RunDecisionLogger(result).emit()
+
+
+# =====================================================================
+#  Outbound finalisation
+# =====================================================================
+
+
+def _merge_risk_flags(
+    payload: dict[str, object],
+    findings: list[str],
+) -> list[str]:
+    raw = payload.get("risk_flags") or []
+    merged: list[str] = list(raw) if isinstance(raw, list) else []
+    for tag in findings:
+        if tag not in merged:
+            merged.append(tag)
+    return merged
+
+
+def _prepend_banner_if_missing(path: Path, banner: str) -> None:
+    txt = path.read_text(encoding="utf-8")
+    if txt.startswith("Confidence:"):
+        return
+    path.write_text(f"{banner}\n\n{txt}", encoding="utf-8")
 
 
 def _finalise_outbound(
@@ -416,21 +382,369 @@ def _finalise_outbound(
       ``outbound_email.json``.
     - Merges every shot finding into ``risk_flags`` (additive, deduped).
     """
-    raw_flags = payload.get("risk_flags") or []
-    existing: list[str] = list(raw_flags) if isinstance(raw_flags, list) else []
-    new_flags: list[str] = list(existing)
-    for tag in state.all_findings():
-        if tag not in new_flags:
-            new_flags.append(tag)
-    payload["risk_flags"] = new_flags
+    payload["risk_flags"] = _merge_risk_flags(payload, state.all_findings())
     payload["pipeline"] = state.to_envelope()
-
     out_json_path.write_text(
         json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8"
     )
+    _prepend_banner_if_missing(out_txt_path, state.banner())
 
-    banner = state.banner()
-    txt = out_txt_path.read_text(encoding="utf-8")
-    if not txt.startswith("Confidence:"):
-        out_txt_path.write_text(f"{banner}\n\n{txt}", encoding="utf-8")
 
+# =====================================================================
+#  IntakeRun — orchestrates the 6 pipeline shots
+# =====================================================================
+
+
+@dataclass
+class _IntakeRun:
+    """Stateful orchestrator for one invoice-intake invocation.
+
+    One method per shot keeps each step small and individually readable;
+    ``execute`` is the linear story.
+    """
+
+    email_path: Path
+    pdf_path: Path | None
+    out_dir: Path
+    openai_client: "OpenAI | None"
+
+    _state: PipelineState = field(default_factory=PipelineState, init=False)
+    _usage: UsageMeter = field(default_factory=UsageMeter, init=False)
+    _email: _ParsedEmail = field(init=False)
+    _payload: dict[str, object] = field(default_factory=dict, init=False)
+    _result: object = field(default=None, init=False)
+    _inj_llm_findings: list[str] = field(default_factory=list, init=False)
+
+    # ---- public entry point -----------------------------------------
+
+    def execute(self) -> IntakeResult:
+        self._resolve_email_path()
+        self._read_and_parse_email()
+        self.pdf_path = self._resolve_and_check_pdf()
+        self._prepare_out_dir()
+        self._shot_pre_flight()
+        self._invoke_agent()
+        self._collect_agent_usage()
+        self._collect_extract_usage()
+        self._load_emitted_payload()
+        self._shot_extract()
+        self._shot_arithmetic()
+        self._shot_critic()
+        self._shot_injection()
+        self._shot_finalise()
+        self._log_pipeline_complete()
+        return self._build_result()
+
+    # ---- step 1: input resolution -----------------------------------
+
+    def _resolve_email_path(self) -> None:
+        self.email_path = self.email_path.expanduser().resolve()
+        if not self.email_path.is_file():
+            raise FileNotFoundError(f"Email file not found: {self.email_path}")
+
+    def _read_and_parse_email(self) -> None:
+        data = json.loads(self.email_path.read_text(encoding="utf-8"))
+        message = data.get("Message", data)
+        if not isinstance(message, dict):
+            message = {}
+        self._email = _parse_email_message(message)
+        _log_parsed_email(self._email)
+
+    def _resolve_and_check_pdf(self) -> Path:
+        explicit = self.pdf_path is not None
+        resolved = _resolve_pdf_path(
+            self.email_path, self.pdf_path, self._email.attachments
+        )
+        if not resolved.is_file():
+            log.error(
+                "decision pdf_check=MISSING path=%s explicit=%s", resolved, explicit
+            )
+            raise FileNotFoundError(f"PDF attachment not found: {resolved}")
+        log.info(
+            "pdf check=OK size_bytes=%d path=%s",
+            resolved.stat().st_size, resolved,
+        )
+        return resolved
+
+    def _prepare_out_dir(self) -> None:
+        self.out_dir = self.out_dir.expanduser().resolve()
+        self.out_dir.mkdir(parents=True, exist_ok=True)
+        # Tools read this env var to route artifacts; scoped to this run.
+        os.environ[OUT_DIR_ENV] = str(self.out_dir)
+        log.info(
+            "agent model=%s out_dir_env=%s=%s",
+            _AGENT_MODEL, OUT_DIR_ENV, self.out_dir,
+        )
+
+    # ---- step 2: shot 0 (pre-flight) --------------------------------
+
+    def _shot_pre_flight(self) -> None:
+        findings = scan_for_injection(self._email.body_text)
+        if not self._email.attachments:
+            findings.append("no_attachments_in_email")
+        publish_injection_signals(findings)
+        # Build evidence quotes for any regex tags that fired against the
+        # email body. ``no_attachments_in_email`` is a structural finding
+        # (no source text), so it intentionally has no evidence row.
+        evidence = quotes_for_email_injection(
+            [t for t in findings if t != "no_attachments_in_email"],
+            self._email.body_text or "",
+        )
+        self._state.record(
+            name="pre_flight",
+            kind="deterministic",
+            model="",
+            findings=findings,
+            evidence=evidence,
+        )
+
+    # ---- step 3: invoke the agent -----------------------------------
+
+    def _build_user_prompt(self) -> str:
+        return (
+            "Inbound email JSON (verbatim):\n"
+            f"{json.dumps(self._email.message, ensure_ascii=False)}\n\n"
+            f"The PDF attachment is available locally at: {self.pdf_path}\n"
+            "Run the intake workflow."
+        )
+
+    def _invoke_agent(self) -> None:
+        prompt = self._build_user_prompt()
+        log.info("agent invoking Runner.run_sync prompt_chars=%d", len(prompt))
+        self._result = Runner.run_sync(build_agent(), prompt)
+        _log_run_decisions(self._result)
+
+    # ---- step 3b: usage collection (agent loop + extract tool) -----
+
+    def _collect_agent_usage(self) -> None:
+        """Sum token usage across every Responses-API call the SDK made
+        during ``Runner.run_sync``. Records as one ``agent_loop`` entry."""
+        raw_responses = getattr(self._result, "raw_responses", None) or []
+        if not raw_responses:
+            return
+        agg: dict[str, int] = {
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "total_tokens": 0,
+            "cached_input_tokens": 0,
+            "reasoning_tokens": 0,
+        }
+        seen_any = False
+        for resp in raw_responses:
+            u = extract_usage(resp)
+            if not u:
+                continue
+            seen_any = True
+            for key, val in u.items():
+                agg[key] = agg.get(key, 0) + int(val)
+        if seen_any:
+            self._usage.record_dict("agent_loop", _AGENT_MODEL, agg)
+
+    def _collect_extract_usage(self) -> None:
+        """Pick up the side-channel usage file written by the extract tool."""
+        result = read_extract_usage(self.out_dir)
+        if result is None:
+            return
+        model, usage = result
+        self._usage.record_dict("extract", model or "", usage)
+
+    # ---- step 4: read what the agent emitted ------------------------
+
+    def _out_json_path(self) -> Path:
+        return self.out_dir / "outbound_email.json"
+
+    def _out_txt_path(self) -> Path:
+        return self.out_dir / "outbound_email.txt"
+
+    def _load_emitted_payload(self) -> None:
+        path = self._out_json_path()
+        if not path.is_file():
+            return
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            log.warning("post-agent: cannot read outbound_email.json: %s", exc)
+            return
+        if isinstance(data, dict):
+            self._payload = data
+
+    # ---- step 5: shot 1 (extract observation) -----------------------
+
+    def _shot_extract(self) -> None:
+        findings: list[str] = []
+        if not self._payload:
+            findings.append("no_payload_emitted")
+        else:
+            if not self._payload.get("invoice_number"):
+                findings.append("missing_invoice_number")
+            if self._payload.get("total_due") is None:
+                findings.append("missing_total_due")
+        self._state.record(
+            name="extract",
+            kind="llm",
+            model=os.getenv("INVOICE_EXTRACT_MODEL") or "gpt-5-mini",
+            findings=findings,
+        )
+
+    # ---- step 6: shot 2 (arithmetic) --------------------------------
+
+    def _shot_arithmetic(self) -> None:
+        findings = arithmetic_check(self._payload) if self._payload else []
+        evidence: list[Evidence] = []
+        for f in findings:
+            ev = quote_for_arithmetic(self._payload, f)
+            if ev is not None:
+                evidence.append(ev)
+        self._state.record(
+            name="arithmetic_check",
+            kind="deterministic",
+            model="",
+            findings=findings,
+            evidence=evidence,
+        )
+
+    # ---- step 7: shot 3 (critic) ------------------------------------
+
+    def _shot_critic(self) -> None:
+        if self.openai_client is None:
+            self._state.skip(
+                "critic_review", "llm", _CRITIC_MODEL, reason="no_openai_client"
+            )
+            return
+        self._run_llm_shot(
+            shot_name="critic_review",
+            body=self._do_critic_review,
+        )
+
+    def _do_critic_review(self) -> tuple[list[str], list[Evidence]]:
+        pdf_text = extract_pdf_content(self.pdf_path).text
+        report = verify_extraction(
+            payload_json=json.dumps(self._payload, ensure_ascii=False),
+            pdf_text=pdf_text,
+            client=self.openai_client,
+            model=_CRITIC_MODEL,
+            usage_sink=self._usage.sink_for("critic_review", _CRITIC_MODEL),
+        )
+        findings: list[str] = []
+        evidence: list[Evidence] = []
+        for d in report.disagreements:
+            findings.append(f"verifier_disagreement_{d.field}")
+            evidence.append(quote_for_disagreement(d))
+        for score in report.field_confidence:
+            if score.level == "low":
+                findings.append(f"low_confidence_{score.field}")
+                evidence.append(quote_for_low_confidence(score.field))
+        return findings, evidence
+
+    # ---- step 8: shot 4 (injection) ---------------------------------
+
+    def _shot_injection(self) -> None:
+        if self.openai_client is None:
+            self._state.skip(
+                "injection_screen", "llm", _CRITIC_MODEL, reason="no_openai_client"
+            )
+            return
+        self._run_llm_shot(
+            shot_name="injection_screen",
+            body=self._do_injection_screen,
+        )
+
+    def _do_injection_screen(self) -> tuple[list[str], list[Evidence]]:
+        pdf_text = extract_pdf_content(self.pdf_path).text
+        combined = f"{self._email.body_text}\n---\n{pdf_text}"
+        findings = injection_screen(
+            text=combined,
+            client=self.openai_client,
+            model=_CRITIC_MODEL,
+            usage_sink=self._usage.sink_for("injection_screen", _CRITIC_MODEL),
+        )
+        # The LLM screen returns free-form snake_case tags. For tags that
+        # match a known regex pattern, re-run the regex against the
+        # combined text to surface a precise quote; otherwise emit a
+        # generic Evidence row pointing at the document.
+        evidence: list[Evidence] = []
+        for tag in findings:
+            ev = quote_for_regex_finding(
+                tag, combined, source="pdf_text", location="email + pdf_text"
+            )
+            if ev is None:
+                evidence.append(
+                    Evidence(
+                        finding=tag,
+                        source="pdf_text",
+                        quote=(
+                            "LLM injection screen flagged this tag; see the "
+                            "PDF and email body for the offending text."
+                        ),
+                        location="email + pdf_text",
+                    )
+                )
+            else:
+                evidence.append(ev)
+        return findings, evidence
+
+    def _run_llm_shot(
+        self,
+        *,
+        shot_name: str,
+        body: Callable[[], tuple[list[str], list[Evidence]]],
+    ) -> None:
+        """Shared try/record/fail wrapper for the two LLM shots."""
+        try:
+            findings, evidence = body()
+        except Exception as exc:  # noqa: BLE001 — recorded as FAIL, not silent
+            log.warning("%s FAILED: %s", shot_name, exc)
+            self._state.fail(shot_name, "llm", _CRITIC_MODEL, str(exc)[:120])
+            return
+        self._state.record(
+            shot_name, "llm", _CRITIC_MODEL, findings, evidence=evidence
+        )
+
+    # ---- step 9: shot 5 (finalise) ----------------------------------
+
+    def _shot_finalise(self) -> None:
+        txt_path = self._out_txt_path()
+        json_path = self._out_json_path()
+        artefacts_present = txt_path.is_file() and json_path.is_file()
+        findings: list[str] = [] if artefacts_present else ["no_outbound_artifacts"]
+        self._state.record(
+            name="synthesis_finalise",
+            kind="deterministic",
+            model="",
+            findings=findings,
+        )
+        if not artefacts_present:
+            log.warning(
+                "synthesis_finalise: missing artifacts txt=%s json=%s — skipping rewrite",
+                txt_path.is_file(), json_path.is_file(),
+            )
+            return
+        # Attach the usage envelope as a sibling of `pipeline` BEFORE
+        # rewriting the JSON file so observability lands on disk.
+        self._payload["usage"] = self._usage.as_envelope()
+        _finalise_outbound(
+            out_txt_path=txt_path,
+            out_json_path=json_path,
+            payload=self._payload,
+            state=self._state,
+        )
+
+    # ---- step 10: completion ----------------------------------------
+
+    def _log_pipeline_complete(self) -> None:
+        self._usage.log_summary(log)
+        log.info(
+            "pipeline complete confidence=%.2f shots=%d flags=%d",
+            self._state.confidence,
+            len(self._state.shots),
+            self._state.flag_count(),
+        )
+
+    def _build_result(self) -> IntakeResult:
+        return IntakeResult(
+            agent_reply=getattr(self._result, "final_output", "") or "",
+            artifacts={
+                "outbound_email.txt": self._out_txt_path(),
+                "outbound_email.json": self._out_json_path(),
+            },
+        )

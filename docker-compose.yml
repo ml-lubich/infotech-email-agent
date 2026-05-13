@@ -1,0 +1,36 @@
+# One-command spin-up for friends:
+#
+#   echo "OPENAI_API_KEY=sk-..." > .env
+#   docker compose up
+#
+# Then open http://localhost:8000/
+
+services:
+  agent:
+    build:
+      context: .
+      target: runtime
+    image: infotech-agent:latest
+    container_name: infotech-agent
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env                 # must contain OPENAI_API_KEY=...
+    environment:
+      INVOICE_WEB_HOST: "0.0.0.0"
+      INVOICE_WEB_PORT: "8000"
+    volumes:
+      # Persist per-request case outputs on the host so you can inspect
+      # `outbound_email.{txt,json}` and `run.log` after a session.
+      - ./out:/app/out
+    restart: unless-stopped
+
+  # Run the offline pytest suite in a clean container:
+  #   docker compose run --rm tests
+  tests:
+    build:
+      context: .
+      target: test
+    image: infotech-agent-tests:latest
+    profiles: ["tests"]      # excluded from `docker compose up`
+    command: ["uv", "run", "pytest", "-q"]

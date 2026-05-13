@@ -3,6 +3,7 @@ name = "invoice-intake-agent"
 version = "0.1.0"
 description = "Invoice intake agent built on the OpenAI Agents SDK."
 readme = "README.md"
+license = { file = "LICENSE" }
 requires-python = ">=3.12"
 dependencies = [
     "openai-agents>=0.17.2",
@@ -12,17 +13,22 @@ dependencies = [
     "pymupdf>=1.27.2.3",
     "python-dotenv>=1.2.2",
     "rapidocr-onnxruntime>=1.4.0",
+    "fastapi>=0.118.0",
+    "uvicorn[standard]>=0.34.0",
+    "python-multipart>=0.0.20",
+    "typer>=0.20.0",
 ]
 
 [project.scripts]
 invoice-intake = "invoice_agent.cli:main"
+infotech-email-agent = "invoice_agent_web.cli:main"
 
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/invoice_agent"]
+packages = ["src/invoice_agent", "src/invoice_agent_web"]
 
 [dependency-groups]
 dev = [

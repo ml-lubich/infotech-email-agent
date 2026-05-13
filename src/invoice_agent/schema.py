@@ -2,7 +2,37 @@
 
 from __future__ import annotations
 
+from typing import Literal
+
 from pydantic import BaseModel, Field
+
+
+EvidenceSource = Literal[
+    "email",
+    "pdf_text",
+    "extracted_payload",
+    "verifier",
+    "summary",
+]
+
+
+class Evidence(BaseModel):
+    """One AP-facing pointer back to the substring that triggered a finding.
+
+    Additive, optional, never required. Old consumers that ignore the
+    field continue to work. Per `docs/API.md`, ``quote`` is a short
+    (≤ 240 chars) substring from ``source``; ``location`` is a human
+    hint such as ``"PDF page 1"``, ``"email.body"``, or
+    ``"field: total_due"``.
+    """
+
+    finding: str = Field(description="Snake_case finding tag this evidence supports.")
+    source: EvidenceSource = Field(description="Which source the quote came from.")
+    quote: str = Field(description="Short substring from `source` (≤ 240 chars).")
+    location: str | None = Field(
+        default=None,
+        description="Human hint like 'PDF page 1' or 'field: total_due'.",
+    )
 
 
 class LineItem(BaseModel):

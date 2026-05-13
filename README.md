@@ -35,6 +35,46 @@ flowchart LR
     class TXT,JSON,LOG out;
 ```
 
+## TL;DR — try it in 60 seconds
+
+**With Docker (recommended for friends):**
+
+```bash
+echo "OPENAI_API_KEY=sk-..." > .env
+docker compose up
+# open http://localhost:8000/  →  click any shipped example, watch it run
+```
+
+**With uv (for hacking):**
+
+```bash
+uv sync                                # one-time
+echo "OPENAI_API_KEY=sk-..." > .env
+uv run infotech-email-agent            # builds the dashboard, opens browser
+```
+
+That single Typer CLI (`infotech-email-agent`) ships:
+
+| Command  | What it does |
+|---|---|
+| `up`      | Build the React/Vite dashboard if missing, serve API + UI on one port (default `:8000`), open the browser. |
+| `dev`     | Backend with `--reload`; run `bun run dev` in `frontend/` for hot-reload UI. |
+| `doctor`  | Colour diagnostics: `OPENAI_API_KEY`, Python/Bun versions, bundle status. |
+| `version` | Print the installed semver. |
+
+CLI-only batch mode (no browser) is still available:
+
+```bash
+uv run invoice-intake --email ./examples/case_7_jpy_no_decimals/Email.json
+```
+
+The dashboard renders a confidence gauge, risk-flag chips
+(`bank_account_change_requested`, `prompt_injection_attempt_in_document`,
+…), the per-shot pipeline timeline, the extracted invoice card, and the
+outbound packet (the `.txt` brief + `.json` payload + tail of `run.log`).
+Drop your own `Email.json` + `Invoice.pdf`, or one-click any of the 28
+shipped fixtures.
+
 ## Table of contents
 
 - [What it does](#what-it-does)
@@ -296,16 +336,45 @@ Canonical docs (see [docs/](docs/)):
 - [docs/TESTING.md](docs/TESTING.md) — verification commands and Definition of Done.
 - [docs/RUNBOOK.md](docs/RUNBOOK.md) — setup, run, troubleshooting.
 - [docs/CHANGELOG.md](docs/CHANGELOG.md) — change history.
+- [frontend/README.md](frontend/README.md) — optional React + Vite + TypeScript dashboard, launched by the `infotech-email-agent` Typer CLI (FastAPI adapter at `src/invoice_agent_web/`).
 
 ## Tests
 
-Offline pytest suite (no OpenAI calls):
+Offline pytest suite (no OpenAI calls — the SDK is stubbed in
+`tests/conftest.py`):
 
 ```bash
-uv run pytest
+uv run pytest               # local
+docker compose run --rm tests   # in the test image
 ```
 
-See [docs/TESTING.md](docs/TESTING.md) for coverage and Definition of Done.
+230 tests, coverage gate ≥ 80% (last run: 97%). See
+[docs/TESTING.md](docs/TESTING.md) for the Definition of Done.
+
+## Docker
+
+The repository ships a multi-stage [Dockerfile](Dockerfile) and a
+[docker-compose.yml](docker-compose.yml):
+
+| Stage      | Purpose                                                  |
+|------------|----------------------------------------------------------|
+| `frontend` | `oven/bun` builds the Vite bundle into `/frontend/dist`. |
+| `base`     | `python:3.12-slim` + `uv sync --frozen --no-dev` + tesseract. |
+| `runtime`  | Default target. Runs `infotech-email-agent up` on `:8000`. |
+| `test`     | Adds dev deps + `tests/`. `CMD` runs `uv run pytest -q`. |
+
+```bash
+docker build -t infotech-agent .                    # runtime image
+docker build -t infotech-agent-tests --target test . # test image
+docker run --rm -p 8000:8000 \
+           -e OPENAI_API_KEY=$OPENAI_API_KEY \
+           -v "$PWD/out:/app/out" \
+           infotech-agent
+```
+
+`out/` is mounted read-write so the per-case artifacts
+(`outbound_email.{txt,json}` + `run.log`) stay on the host after the
+container exits.
 
 ## Error handling
 

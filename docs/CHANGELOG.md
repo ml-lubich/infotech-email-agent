@@ -12,7 +12,325 @@ This project is pre-1.0; minor versions may include breaking changes.
 
 ## [Unreleased]
 
+### Added
+- **Frontend Playwright e2e suite (hermetic).** New `frontend/tests/e2e/`
+  exercises the dashboard against the production `vite preview` build
+  with **all** `/api/**` traffic intercepted via `page.route()` (see
+  `tests/e2e/fixtures/mocks.ts`). The suite NEVER reaches the FastAPI
+  backend and never burns OpenAI credit. A registered catch-all route
+  fails the test loudly if any unmocked `/api/*` request slips through.
+  Coverage: header + health pill (healthy and degraded), shipped-example
+  list rendering and click-to-run, full pipeline trace (confidence
+  gauge, risk-flag chips, three-shot timeline, invoice card with
+  currency-aware totals), upload flow (`Run intake` disabled until an
+  `Email.json` is dropped on the hidden file input), backend-error
+  banner, theme toggle persistence to `localStorage`, JPY no-decimal
+  formatting. Headless chromium by default; CI gets retries + traces +
+  videos on failure. Wired into `bun run ci` (lint → build → e2e).
+  See `docs/TESTING.md` for the new "Frontend e2e" section.
+
+### Fixed
+- **Dashboard "Run log" tab no longer shows "(no log)".** The FastAPI
+  adapter (`src/invoice_agent_web/main.py::_execute_pipeline`) now
+  attaches a per-request `logging.FileHandler` to the root logger that
+  writes pipeline records to `<case_dir>/run.log`, mirroring the CLI's
+  `_configure_logging` behaviour but scoped to a single intake call
+  (handler is detached + closed in a `finally` block). Previously the
+  web layer never installed a file sink, so `IntakeResponse.log_tail`
+  was always `""` and the UI rendered the placeholder. The handler
+  raises the root logger to `INFO` if it is `NOTSET`/higher so library
+  callers (tests, embedded use) cannot silently drop records. New
+  regression coverage in `tests/test_web_run_log.py`.
+
+### Added
+- **Per-shot Evidence (audit trail).** Every entry in
+  `pipeline.shots[]` now carries an additive `evidence: list[Evidence]`
+  field. Each entry is the AP reviewer's pointer back to the exact text
+  that triggered a finding: `{finding, source, quote, location}` where
+  `source ∈ {email, pdf_text, extracted_payload, verifier, summary}`,
+  `quote` is a ≤ 240-char substring from that source, and `location`
+  is a human hint such as `"PDF page 1"`, `"email.body"`, or
+  `"field: total_due"`. Implemented in a new pure module
+  `src/invoice_agent/evidence.py` that re-uses the same compiled
+  regexes as `guardrails._INJECTION_PATTERNS` (single source of truth)
+  and turns verifier `Disagreement`s into structured quotes — no extra
+  LLM calls, no I/O. The dashboard timeline renders evidence as a
+  collapsible "Evidence" block under each shot's findings chips so
+  reviewers can see *why* the pipeline flagged something, not just
+  *that* it did. The field is optional and defaults to `[]`; old
+  consumers (TXT renderer, CHANGELOG snapshots, downstream automation)
+  ignore it. Confidence math, finding-tag set, `risk_flags`, the
+  outbound TXT format, and every `@function_tool` entry-point are
+  byte-identical to the previous release. Documented in `docs/API.md`
+  (response shape) and `docs/ARCHITECTURE.md` (module map).
+
+### Added
+- **Token-usage observability (`invoice_agent/usage.py`).** Every LLM
+  shot now reports its token spend through a single `UsageMeter`
+  owned by `_IntakeRun`:
+  - `extract_usage(response)` defensively reads `response.usage`
+    (input/output/total) plus `input_tokens_details.cached_tokens`
+    and `output_tokens_details.reasoning_tokens` (GPT-5 fields).
+  - `UsageMeter.record_response` / `record_dict` push one
+    immutable `ShotUsage` record per call; `sink_for(shot, model)`
+    returns a one-arg callback for `verify_extraction` and
+    `injection_screen` (new optional `usage_sink=` kwarg, additive).
+  - The extract tool publishes its usage via a side-channel file
+    (`usage_extract.json` in the run's out-dir, mirroring the
+    `OUT_DIR_ENV` pattern) so the orchestrator can fold it in
+    after `Runner.run_sync` returns.
+  - `_IntakeRun` also sums `RunResult.raw_responses[*].usage` into
+    a single `agent_loop` shot record.
+  - Per-run output: one `usage shot=… model=… input=… output=… total=… cached_in=… reasoning_out=…`
+    log line per LLM shot, one `usage_total shots=… input=… output=… total=… cache_hit_ratio=…`
+    summary line, and a new `payload["usage"] = {totals, cache_hit_ratio, shots: [...]}`
+    block in `outbound_email.json` (sibling of `payload["pipeline"]`).
+  - Verified end-to-end on `examples/case_1`: 27,327 total tokens
+    across 4 LLM shots with a 35% prompt-cache hit ratio.
+  - 17 new tests in `tests/test_usage.py` cover the response-shape
+    parsing (full / partial / absent / non-numeric), accumulator
+    math, the cache-hit ratio with the zero-division guard, the
+    side-channel write/read roundtrip, and an integration test
+    proving `tools._call_extract_model` writes the side-channel
+    file. All 247 tests pass; coverage 95%.
+- **Containerization.** Multi-stage [Dockerfile](../Dockerfile) (`frontend`
+  → `base` → `runtime` / `test`) and
+  [docker-compose.yml](../docker-compose.yml). `docker compose up` builds
+  the React bundle with Bun, installs Python deps with `uv sync --frozen
+  --no-dev` on `python:3.12-slim` (with `tesseract-ocr` for the OCR
+  fallback), and serves `infotech-email-agent up --no-browser` on `:8000`
+  with `out/` mounted as a host volume. The `test` target ships dev deps +
+  `tests/` and runs `uv run pytest -q` — used by `docker compose run --rm
+  tests`. Build context is pruned by [.dockerignore](../.dockerignore)
+  (drops `.venv`, `node_modules`, `out/`, `tmp/`, `_deprecated/`).
+  Documented in `docs/RUNBOOK.md` (Containerized run section) and the
+  top-level README.
+
+### Removed
+- **Stray cookie file** (`200`, a Netscape-format curl cookie jar
+  accidentally committed by `curl -c 200 ...`). Not referenced by any
+  code.
+
+### Changed (UI)
+- **Dashboard now ships dark + light themes** with a sun/moon toggle
+  in the top-right header (`frontend/src/components/ThemeToggle.tsx`).
+  Initial theme follows OS `prefers-color-scheme`; once the user picks
+  one it pins to `localStorage["iia-theme"]`. All component colours
+  switched to semantic CSS tokens under `:root[data-theme="dark"]` /
+  `:root[data-theme="light"]` in `frontend/src/styles.css`, so the
+  swap is instantaneous and consistent across cards, chips, gauge,
+  timeline, totals, payload viewer, and banners.
+- **New per-shot confidence sparkline** in the Pipeline Confidence
+  card (`ConfidenceGauge.tsx`). Renders one coloured bar per shot
+  (`pass` / `flag` / `fail` / `skipped`), with hover tooltips showing
+  shot name, decision, and per-shot confidence. Replaces the previous
+  "just numbers" gauge with an at-a-glance trace of how the pipeline
+  graded itself shot by shot.
+- Subtle polish: glassy `backdrop-filter` on the health pill, refined
+  light-mode radial backdrop (blue + violet), softer light-mode shadow.
+
+### Changed (responsive)
+- **Dashboard now scales fluidly across breakpoints.** App padding and
+  the H1 use `clamp()` so margins shrink on phones and grow on large
+  screens. Header is `flex-wrap` so the health pill + theme toggle
+  drop below the title on narrow viewports. Sidebar/main grid uses
+  `minmax(0, 1fr)` so long content (subjects, payload JSON) cannot
+  overflow. Three new media queries: ≤880px stacks the gauge above its
+  meta tiles and collapses the invoice grid to one column; ≤560px
+  shrinks the gauge, hides the theme-toggle text label (icon only),
+  reflows shot rows, and lets `table.lines` scroll horizontally;
+  ≥1600px opens the canvas to a 1600px max-width with a slightly
+  wider sidebar so the right pane breathes.
+
+### Fixed
+- **`infotech-email-agent` (no subcommand) crashed at uvicorn startup**
+  with `TypeError: port must be a str, bytes or int`. The root callback
+  used `ctx.invoke(up)` which does not resolve Typer's `OptionInfo`
+  defaults — `host`/`port` arrived as sentinel objects. Fix: pass the
+  resolved env-aware defaults explicitly (`host=os.getenv("INVOICE_WEB_HOST",
+  "127.0.0.1"), port=int(os.getenv("INVOICE_WEB_PORT", "8000"))`).
+  Regression guard added to `tests/test_web_cli.py::test_default_invocation_runs_up`
+  asserting the captured uvicorn kwargs are real `str` / `int`.
+
+### Added
+- **Web dashboard (new feature axis).** A React + Vite + TypeScript
+  frontend under `frontend/` and a thin FastAPI adapter at
+  `src/invoice_agent_web/main.py`, launched by a Typer CLI
+  (`src/invoice_agent_web/cli.py`, console-script
+  **`infotech-email-agent`**). `infotech-email-agent up` prints an
+  ASCII banner + diagnostics, builds the React bundle via Bun on
+  first run, mounts it at `/` and the FastAPI API at `/api/*` on a
+  single port (default 8000), and opens the browser. Subcommands:
+  `up` (default), `dev`, `doctor`, `version`. The adapter stages an
+  uploaded `Email.json` (+ optional PDF) into a per-request case
+  directory under `out/web/<stamp>_<slug>_<id>/` and calls
+  `invoice_agent.run_intake` exactly like the CLI — no new business
+  logic. The UI renders the pipeline confidence gauge, the per-shot
+  timeline, risk-flag chips, the extracted invoice
+  (vendor/totals/line items), and the outbound packet (summary /
+  JSON / log tail). New deps: `fastapi`, `uvicorn[standard]`,
+  `python-multipart`, `typer`. Endpoints documented in `docs/API.md`;
+  how-to in `docs/RUNBOOK.md`; module map updated in
+  `docs/ARCHITECTURE.md`. All 213 existing tests still pass.
+
+- **CLI test suite for `infotech-email-agent`.** New
+  `tests/test_web_cli.py` (17 tests, runner = `typer.testing.CliRunner`)
+  pins the documented `--help` surface for the root and every
+  subcommand, asserts the `OPENAI_API_KEY`-missing exit codes, asserts
+  `up` invokes uvicorn with the requested host/port (and that
+  `--rebuild` forces `_build_frontend(force=True)`), asserts the
+  no-subcommand call delegates to `up`, and covers the
+  `_bundle_built` / `_build_frontend` helpers including the
+  "Bun missing" early-exit. Uvicorn, the browser launch, `bun run
+  build`, and `time.sleep` are patched out — the suite never binds a
+  port. Total tests: 213 → 230, coverage gate (97%) still met.
+
+### Fixed
+- **`infotech-email-agent version` crashed** with `TypeError: version()
+  takes 0 positional arguments but 1 was given` — the Typer command
+  name shadowed `importlib.metadata.version`. Imported as
+  `version as _pkg_version`. Caught by the new CLI test suite.
+
+### Changed (CLI help)
+- Each `infotech-email-agent` subcommand now ships a worked Examples
+  block in its `--help` epilog (root, `up`, `dev`, `doctor`, `version`)
+  so the binary's help text and `docs/RUNBOOK.md` stay in lockstep.
+
 ### Changed
+- **OOP / short-function refactor across the package** (no public-API
+  change, no behaviour change, all 213 tests pass, coverage 97%).
+  - `agent.run_intake` (225-line procedural function) is now a thin
+    facade over `_IntakeRun`, a small dataclass orchestrator with one
+    method per pipeline shot (`_shot_pre_flight`, `_shot_extract`,
+    `_shot_arithmetic`, `_shot_critic`, `_shot_injection`,
+    `_shot_finalise`). Two LLM shots share a `_run_llm_shot`
+    try/record/fail wrapper.
+  - `agent._log_run_decisions` (58-line if/elif chain) is now a thin
+    shim around `_RunDecisionLogger`, which dispatches by SDK item
+    kind to one short handler each (`_on_tool_call`, `_on_tool_output`,
+    `_on_message`, `_on_reasoning`).
+  - Email parsing extracted into `_ParsedEmail` +
+    `_parse_email_message`; PDF resolution into `_resolve_pdf_path`;
+    outbound finalisation into `_merge_risk_flags` +
+    `_prepend_banner_if_missing`.
+  - `pdf_extract.extract_pdf_content` (94 lines) decomposed into
+    `_open_pdf`, `_extract_page_text` (with `_safe_native_text` +
+    `_merge_native_and_ocr`) and `_extract_page_images` (with
+    `_safe_image_list`, `_decode_image`, `_to_png_bytes`).
+  - `tools._extract_invoice_from_pdf_impl` (71 lines) split into
+    `_log_pdf_parsed`, `_build_extract_user_content`,
+    `_log_extract_call`, `_call_extract_model`,
+    `_handle_missing_payload`, `_log_extract_success`.
+  - `tools._send_customer_service_notification_impl` (59 lines) split
+    into `_try_parse_payload`, `_log_notify_decision`,
+    `_apply_guardrails_and_serialise`.
+  - `guardrails.arithmetic_check` (67 lines) split into per-check
+    helpers `_sum_amounts`, `_check_totals_match`,
+    `_check_line_items_match`, `_check_pattern`,
+    `_check_negative_total`.
+  - `cli.main` (64 lines) split into `_validate_preconditions`,
+    `_log_run_start`, `_run_intake_or_report`, `_log_artifacts`,
+    `_print_result`.
+- **Docs reconciled with code.** `docs/ARCHITECTURE.md` module map now
+  lists `pipeline.py`, `verifier.py`, `guardrails.py`, and
+  `_llm_params.py`; the "Tools called once" invariant is replaced by
+  "each shot runs at most once per run". `docs/API.md` documents the
+  `INVOICE_CRITIC_MODEL`, `INVOICE_PIPELINE_LLM_DISABLED`, and
+  `INVOICE_INJECTION_SIGNALS` env vars and the new `pipeline` envelope
+  + confidence banner in the outbound artefacts. `docs/TESTING.md`
+  fixes the coverage threshold (80%, not 100%) and lists the six
+  test modules that were previously missing (`test_guardrails.py`,
+  `test_llm_params.py`, `test_safety_knobs.py`, `test_pipeline.py`,
+  `test_pipeline_activation.py`, `test_verifier.py`). Suite size now
+  213 tests across 19 modules. No code changes.
+
+### Added
+- **MIT LICENSE** at repo root + `license = { file = "LICENSE" }` in
+  `pyproject.toml`. Closes the licensing gap for distribution.
+- **`invoice_agent/_llm_params.py`** — single source of truth for the
+  2026 GPT-5 safety / cost knobs. Every `responses.parse(...)` call now
+  forwards:
+  - `reasoning.effort` — per-shot tuning (`minimal` for extract /
+    injection screen, `low` for verifier critic). Reasoning effort is
+    the GPT-5 control knob; `temperature` / `top_p` are ignored by
+    reasoning models so we do not set them.
+  - `text.verbosity = "low"` — short structured outputs only.
+  - `max_output_tokens` — hard per-shot cost cap (extract 2048,
+    verify 1024, injection 256).
+  - `safety_identifier = "invoice-intake-agent"` — stable abuse-signal
+    hash for OpenAI to cluster behaviour on this UNTRUSTED-input
+    workload (per OpenAI safety-best-practices guide).
+  - `prompt_cache_key = "<shot>:<model>"` — deterministic key so
+    repeated extract/verify shots route to the same cache shard,
+    cutting first-token latency on repeated invoice templates.
+- **Refusal detection (`tools._extract_refusal`).** Structured-Outputs
+  refusals (top-level `response.refusal` OR nested
+  `output[*].content[*].refusal`) are now surfaced as
+  `risk_flags=["model_refused_extraction"]` with the refusal text in
+  `source_warnings`. Refusals are no longer retried 3× as if they were
+  transient errors; they are flagged for the AP human on attempt 1.
+- 22 new tests (`tests/test_llm_params.py`,
+  `tests/test_safety_knobs.py`) pinning per-shot defaults, kwarg
+  forwarding into `responses.parse(...)`, and both refusal-shape paths.
+
+### Removed
+- **`docs/CHANGELOG 2.md`** — stale macOS sync duplicate; the canonical
+  changelog is this file.
+
+### Changed
+- **`agent.py` internal refactor (no public-API change).** The 225-line
+  procedural `run_intake` is now a thin facade over `_IntakeRun`, a
+  small dataclass orchestrator with one method per pipeline shot
+  (`_shot_pre_flight`, `_shot_extract`, `_shot_arithmetic`,
+  `_shot_critic`, `_shot_injection`, `_shot_finalise`). The two LLM
+  shots share a `_run_llm_shot` try/record/fail wrapper.
+  `_log_run_decisions` is now a thin shim around `_RunDecisionLogger`,
+  which dispatches by SDK item kind to one short handler each
+  (`_on_tool_call`, `_on_tool_output`, `_on_message`,
+  `_on_reasoning`). Email parsing extracted into `_ParsedEmail` +
+  `_parse_email_message`; PDF resolution into `_resolve_pdf_path`;
+  outbound finalisation into `_merge_risk_flags` +
+  `_prepend_banner_if_missing`. Public surface (`run_intake`,
+  `IntakeResult`, `build_agent`, `_INSTRUCTIONS`, `_AGENT_MODEL`,
+  `_CRITIC_MODEL`) and every emitted log string are unchanged. All
+  191 tests pass; coverage 97%.
+
+### Added
+- **Bounded retry envelope** for LLM and OCR shots
+  (`src/invoice_agent/_retry.py`). Verifier (`verify_extraction`),
+  injection screen (`injection_screen`), and the local OCR engine call
+  (`pdf_extract._ocr_page`) now survive a single transient failure
+  (e.g. malformed model response, ONNX kernel hiccup) before flowing
+  to the existing `state.fail(...)` path. Defaults: 3 attempts (LLM) /
+  2 attempts (OCR), exponential back-off, allow-list errors NOT
+  retried (programmer bugs surface immediately). Sleep is injectable
+  so unit tests run instantly.
+- `.github/copilot-instructions.md` — **docs-first workflow** for the
+  Copilot / AI agent. Pins the rule: read `docs/` before editing
+  `src/`, plan in `tmp/plan*.md`, update the affected canonical doc
+  in the same transaction, then `uv run pytest -q`.
+- 59 new tests across three new files (all green, no real OpenAI
+  calls):
+  - `tests/test_retry.py` — success-on-1st / retry-and-recover /
+    exhausted-attempts / non-transient-bypass / `on_attempt` callback.
+  - `tests/test_robustness.py` — verifier + injection-screen recover
+    from a transient `RuntimeError` on attempt 2 and exhaust after 3
+    attempts; OCR engine recovers / gives up gracefully against a
+    real pixel-only PDF.
+  - `tests/test_guardrails_adversarial.py` — mixed-case / whitespace
+    prompt injection, "ignore the above messages" filler-word
+    variant, role-redefinition / fake-role-marker / payment-
+    redirection variants, negation phrases must NOT trip the output
+    guardrail, arithmetic-check tolerance + ISO checks, 200 kB input
+    scans in < 500 ms.
+- `tests/conftest.py` — autouse fixture collapses `_retry.time.sleep`
+  to a no-op so retry tests don't pay back-off time.
+
+### Changed
+- `guardrails._INJECTION_PATTERNS["ignore_prior_instructions"]` now
+  permits a short filler word (`the`) between `ignore` and the
+  priority keyword, so phrases like "ignore the above messages" are
+  flagged. Existing patterns unchanged.
 - **CLI now activates LLM verifier shots in production.** `cli.main` builds an
   `OpenAI()` client and injects it into `run_intake(openai_client=...)` so
   shots 3 (`critic_review`, `gpt-5-nano`) and 4 (`injection_screen`,

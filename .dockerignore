@@ -1,0 +1,48 @@
+# Build context exclusions for the Docker image.
+# Keep the wheel small and the build cache stable.
+
+# VCS / editor noise
+.git
+.gitignore
+.github
+.vscode
+.idea
+*.swp
+
+# Local secrets — never bake into the image
+.env
+.env.*
+
+# Python virtualenv + caches (re-created inside the image by uv)
+.venv
+__pycache__
+*.py[cod]
+*.egg-info
+build/
+dist/
+wheels/
+.pytest_cache
+.coverage
+coverage.xml
+htmlcov/
+
+# Per-run agent outputs (mounted as a volume at runtime)
+out/
+
+# Local scratch
+tmp/
+
+# Frontend node modules + lockfile-adjacent caches
+frontend/node_modules
+frontend/.vite
+frontend/dist          # the multi-stage build produces a fresh bundle
+
+# Deprecated / archive
+_deprecated
+
+# Docs are useful inside the image (RUNBOOK is referenced by --help epilogs)
+# so do NOT exclude docs/.
+
+# OS junk
+.DS_Store
+Thumbs.db

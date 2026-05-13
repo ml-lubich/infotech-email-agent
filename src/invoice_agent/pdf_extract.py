@@ -48,6 +48,90 @@ _OCR_MIN_PAGE_CHARS = 200
 _OCR_RENDER_ZOOM = 2.0
 
 
+def _open_pdf(pdf_path: Path) -> "fitz.Document":
+    if not pdf_path.is_file():
+        raise FileNotFoundError(f"PDF not found: {pdf_path}")
+    try:
+        return fitz.open(pdf_path)
+    except Exception as exc:
+        raise ValueError(f"Unreadable PDF: {pdf_path} ({exc})") from exc
+
+
+def _safe_native_text(page: "fitz.Page") -> str:
+    try:
+        return page.get_text("text") or ""
+    except Exception:
+        return ""
+
+
+def _merge_native_and_ocr(native_text: str, ocr_text: str) -> str:
+    if not ocr_text.strip():
+        return native_text
+    if not native_text.strip():
+        return ocr_text
+    return (native_text + "\n" + ocr_text).strip()
+
+
+def _extract_page_text(page: "fitz.Page", page_index: int) -> tuple[str, bool]:
+    """Return ``(text, used_ocr)`` for a single page."""
+    native = _safe_native_text(page)
+    if len(native.strip()) >= _OCR_MIN_PAGE_CHARS:
+        return native, False
+    ocr_text = _ocr_page(page, page_index)
+    merged = _merge_native_and_ocr(native, ocr_text)
+    return merged, bool(ocr_text.strip())
+
+
+def _safe_image_list(page: "fitz.Page") -> list[object]:
+    try:
+        return list(page.get_images(full=True))
+    except Exception:
+        return []
+
+
+def _decode_image(doc: "fitz.Document", xref: int) -> "Image.Image | None":
+    try:
+        base = doc.extract_image(xref)
+    except Exception:
+        return None
+    raw = base.get("image")
+    if not raw:
+        return None
+    try:
+        return Image.open(io.BytesIO(raw))
+    except Exception:
+        return None
+
+
+def _to_png_bytes(pil: "Image.Image") -> bytes:
+    buf = io.BytesIO()
+    pil.convert("RGB").save(buf, format="PNG")
+    return buf.getvalue()
+
+
+def _extract_page_images(
+    doc: "fitz.Document", page: "fitz.Page", page_index: int
+) -> list[PdfImage]:
+    out: list[PdfImage] = []
+    for img_info in _safe_image_list(page):
+        xref = img_info[0]
+        pil = _decode_image(doc, xref)
+        if pil is None:
+            continue
+        if pil.width < _MIN_IMAGE_SIDE or pil.height < _MIN_IMAGE_SIDE:
+            continue
+        out.append(
+            PdfImage(
+                page_index=page_index,
+                name=f"page{page_index}_xref{xref}",
+                png_bytes=_to_png_bytes(pil),
+                width=pil.width,
+                height=pil.height,
+            )
+        )
+    return out
+
+
 def extract_pdf_content(pdf_path: Path) -> PdfContent:
     """Extract text and embedded images from a PDF.
 
@@ -55,70 +139,17 @@ def extract_pdf_content(pdf_path: Path) -> PdfContent:
         FileNotFoundError: pdf_path missing.
         ValueError: PDF cannot be parsed.
     """
-    if not pdf_path.is_file():
-        raise FileNotFoundError(f"PDF not found: {pdf_path}")
-
-    try:
-        doc = fitz.open(pdf_path)
-    except Exception as exc:
-        raise ValueError(f"Unreadable PDF: {pdf_path} ({exc})") from exc
-
+    doc = _open_pdf(pdf_path)
     page_texts: list[str] = []
     images: list[PdfImage] = []
     ocr_pages: list[int] = []
-
     try:
         for page_index, page in enumerate(doc):
-            try:
-                native_text = page.get_text("text") or ""
-            except Exception:
-                native_text = ""
-
-            if len(native_text.strip()) < _OCR_MIN_PAGE_CHARS:
-                ocr_text = _ocr_page(page, page_index)
-                if ocr_text.strip():
-                    page_texts.append(
-                        (native_text + "\n" + ocr_text).strip()
-                        if native_text.strip()
-                        else ocr_text
-                    )
-                    ocr_pages.append(page_index)
-                else:
-                    page_texts.append(native_text)
-            else:
-                page_texts.append(native_text)
-
-            try:
-                img_list = page.get_images(full=True)
-            except Exception:
-                img_list = []
-
-            for img_info in img_list:
-                xref = img_info[0]
-                try:
-                    base = doc.extract_image(xref)
-                except Exception:
-                    continue
-                raw = base.get("image")
-                if not raw:
-                    continue
-                try:
-                    pil = Image.open(io.BytesIO(raw))
-                except Exception:
-                    continue
-                if pil.width < _MIN_IMAGE_SIDE or pil.height < _MIN_IMAGE_SIDE:
-                    continue
-                buf = io.BytesIO()
-                pil.convert("RGB").save(buf, format="PNG")
-                images.append(
-                    PdfImage(
-                        page_index=page_index,
-                        name=f"page{page_index}_xref{xref}",
-                        png_bytes=buf.getvalue(),
-                        width=pil.width,
-                        height=pil.height,
-                    )
-                )
+            text, used_ocr = _extract_page_text(page, page_index)
+            page_texts.append(text)
+            if used_ocr:
+                ocr_pages.append(page_index)
+            images.extend(_extract_page_images(doc, page, page_index))
     finally:
         doc.close()
 
@@ -187,9 +218,19 @@ def _ocr_page(page: "fitz.Page", page_index: int) -> str:
     try:
         # RapidOCR accepts raw bytes; returns (results, elapsed) where
         # results is list[ [box, text, score] ] or None.
-        result, _elapsed = engine(png_bytes)  # type: ignore[operator]
+        # One bounded retry: transient ONNX-runtime hiccups (kernel/threadpool
+        # contention on cold start) shouldn't kill OCR — but if the second
+        # attempt also fails, degrade gracefully (no exception bubbles).
+        from invoice_agent._retry import retry_call
+
+        result, _elapsed = retry_call(
+            lambda: engine(png_bytes),  # type: ignore[operator]
+            label="ocr",
+            attempts=2,
+            base_delay=0.1,
+        )
     except Exception as exc:
-        log.warning("OCR fallback: page %d OCR failed: %s", page_index, exc)
+        log.warning("OCR fallback: page %d OCR failed after retries: %s", page_index, exc)
         return ""
     if not result:
         log.info("OCR fallback: page %d produced no text", page_index)

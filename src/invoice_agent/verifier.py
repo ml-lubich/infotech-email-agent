@@ -25,14 +25,20 @@ Architectural notes:
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING, Final, Literal
+from typing import TYPE_CHECKING, Callable, Final, Literal
 
 from pydantic import BaseModel, Field
 
+from invoice_agent._llm_params import llm_params
+from invoice_agent._retry import retry_call
 from invoice_agent.models import resolve_model
 
 if TYPE_CHECKING:
     from openai import OpenAI
+
+# Callback shape: receives the raw OpenAI Responses-API response so the
+# caller (typically a UsageMeter.sink_for(...)) can pull token counts.
+UsageSink = Callable[[object], None]
 
 log = logging.getLogger(__name__)
 
@@ -99,6 +105,7 @@ def verify_extraction(
     pdf_text: str,
     client: "OpenAI",
     model: str | None = None,
+    usage_sink: UsageSink | None = None,
 ) -> VerificationReport:
     """Run the verifier and return a parsed report.
 
@@ -107,28 +114,45 @@ def verify_extraction(
         pdf_text: Raw PDF text from `pdf_extract.extract_pdf_content`.
         client: An OpenAI client (injected for testability).
         model: Optional override; must be allow-listed.
+        usage_sink: Optional one-arg callback invoked with the raw
+            Responses-API response so a ``UsageMeter`` can record
+            token usage. Default ``None`` = no observability hook.
 
     Raises:
         ValueError: ``model`` is not in the allow-list.
         RuntimeError: the verifier model returned no parsed payload.
     """
     chosen = resolve_model(model, DEFAULT_VERIFIER_MODEL)
-    log.info("decision step=verify action=invoke model=%s", chosen)
-
-    response = client.responses.parse(
-        model=chosen,
-        input=[
-            {"role": "system", "content": VERIFIER_SYSTEM},
-            {"role": "user", "content": build_verifier_user_payload(payload_json, pdf_text)},
-        ],
-        text_format=VerificationReport,
+    params = llm_params(shot="verify", model=chosen)
+    log.info(
+        "decision step=verify action=invoke model=%s effort=%s max_tokens=%d",
+        chosen, params["reasoning"]["effort"], params["max_output_tokens"],
     )
-    parsed = response.output_parsed
-    if parsed is None:
-        raise RuntimeError(
-            "Verifier returned no parsed report; "
-            f"raw output: {(response.output_text or '')[:500]!r}"
+
+    def _call() -> "VerificationReport":
+        response = client.responses.parse(
+            model=chosen,
+            input=[
+                {"role": "system", "content": VERIFIER_SYSTEM},
+                {"role": "user", "content": build_verifier_user_payload(payload_json, pdf_text)},
+            ],
+            text_format=VerificationReport,
+            **params,
         )
+        if usage_sink is not None:
+            try:
+                usage_sink(response)
+            except Exception as exc:  # noqa: BLE001 — observability must not break pipeline
+                log.warning("verify usage_sink failed: %s", exc)
+        parsed = response.output_parsed
+        if parsed is None:
+            raise RuntimeError(
+                "Verifier returned no parsed report; "
+                f"raw output: {(response.output_text or '')[:500]!r}"
+            )
+        return parsed
+
+    parsed = retry_call(_call, label="verify")
 
     high = sum(1 for s in parsed.field_confidence if s.level == "high")
     medium = sum(1 for s in parsed.field_confidence if s.level == "medium")
@@ -174,11 +198,15 @@ def injection_screen(
     text: str,
     client: "OpenAI | None",
     model: str,
+    usage_sink: UsageSink | None = None,
 ) -> list[str]:
     """Run the LLM injection-screen shot. Returns finding tags.
 
     Returns ``[]`` (and skips the call) when ``client`` is ``None`` or
     the supplied text is empty/whitespace.
+
+    ``usage_sink`` (optional) receives the raw Responses-API response
+    so callers can record token usage; default ``None`` = no hook.
     """
     if client is None:
         return []
@@ -186,15 +214,26 @@ def injection_screen(
     if not snippet.strip():
         return []
     chosen = resolve_model(model, DEFAULT_VERIFIER_MODEL)
-    response = client.responses.parse(
-        model=chosen,
-        input=[
-            {"role": "system", "content": _INJECTION_SYSTEM},
-            {"role": "user", "content": snippet},
-        ],
-        text_format=_InjectionVerdict,
-    )
-    parsed = response.output_parsed
+    params = llm_params(shot="injection", model=chosen)
+
+    def _call() -> _InjectionVerdict | None:
+        response = client.responses.parse(
+            model=chosen,
+            input=[
+                {"role": "system", "content": _INJECTION_SYSTEM},
+                {"role": "user", "content": snippet},
+            ],
+            text_format=_InjectionVerdict,
+            **params,
+        )
+        if usage_sink is not None:
+            try:
+                usage_sink(response)
+            except Exception as exc:  # noqa: BLE001 — observability must not break pipeline
+                log.warning("injection_screen usage_sink failed: %s", exc)
+        return response.output_parsed
+
+    parsed = retry_call(_call, label="injection")
     if parsed is None:
         log.warning("injection_screen: model returned no parsed verdict")
         return []

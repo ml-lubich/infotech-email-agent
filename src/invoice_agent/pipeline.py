@@ -44,6 +44,8 @@ import logging
 from dataclasses import asdict, dataclass, field
 from typing import Final, Literal
 
+from invoice_agent.schema import Evidence
+
 log = logging.getLogger(__name__)
 
 START_CONFIDENCE: Final[float] = 0.50
@@ -72,6 +74,11 @@ class Shot:
     delta: float
     confidence_after: float
     findings: list[str]
+    # Optional, additive: per-shot AP-facing pointers back to the exact
+    # substring that triggered each finding. Default empty list keeps
+    # every previous serialisation byte-identical when no evidence is
+    # supplied (see `docs/API.md`, `docs/ARCHITECTURE.md`).
+    evidence: list[Evidence] = field(default_factory=list)
 
 
 @dataclass
@@ -112,10 +119,13 @@ class PipelineState:
         kind: ShotKind,
         model: str,
         findings: list[str],
+        evidence: list[Evidence] | None = None,
     ) -> Shot:
         """Record a normal PASS/FLAG outcome and update confidence.
 
         Empty ``findings`` → PASS. Non-empty → FLAG with capped delta.
+        ``evidence`` is optional and defaults to ``[]``; pass per-finding
+        ``Evidence`` entries to surface a quote in the dashboard.
         """
         before = self.confidence
         if findings:
@@ -138,6 +148,7 @@ class PipelineState:
                 delta=round(delta, 2),
                 confidence_after=round(after, 2),
                 findings=list(findings),
+                evidence=list(evidence or []),
             )
         )
 
@@ -199,8 +210,20 @@ class PipelineState:
         return {
             "confidence": round(self.confidence, 2),
             "flag_count": self.flag_count(),
-            "shots": [asdict(s) for s in self.shots],
+            "shots": [self._shot_to_dict(s) for s in self.shots],
         }
+
+    @staticmethod
+    def _shot_to_dict(shot: Shot) -> dict[str, object]:
+        """Serialise a Shot to JSON-safe primitives.
+
+        ``asdict`` does not recurse into Pydantic ``Evidence`` instances,
+        so we hand-convert that field via ``model_dump`` to keep the
+        envelope JSON-serialisable.
+        """
+        d = asdict(shot)
+        d["evidence"] = [e.model_dump() for e in shot.evidence]
+        return d
 
     def banner(self) -> str:
         """One-line human banner for the top of ``outbound_email.txt``."""

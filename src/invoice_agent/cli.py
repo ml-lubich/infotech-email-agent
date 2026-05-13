@@ -89,27 +89,16 @@ def _build_openai_client(log: logging.Logger) -> object | None:
         return None
 
 
-def main(argv: list[str] | None = None) -> int:
-    args = _parse_args(argv)
-    load_dotenv()
-
-    if not os.getenv("OPENAI_API_KEY"):
-        print("ERROR: OPENAI_API_KEY is not set (see .env.example).", file=sys.stderr)
-        return 2
-
-    if not args.email.is_file():
-        print(f"ERROR: email file not found: {args.email}", file=sys.stderr)
-        return 2
-
-    out_dir = _resolve_out_dir(args.email, args.out_dir)
-    log_file = args.log_file if args.log_file is not None else out_dir / "run.log"
-
-    _configure_logging(log_file)
-    log = logging.getLogger("invoice_agent.cli")
+def _log_run_start(
+    log: logging.Logger, args: argparse.Namespace, out_dir: Path, log_file: Path
+) -> None:
     log.info("===== invoice-intake run START =====")
     log.info("cwd=%s", Path.cwd())
     log.info("email=%s", args.email.resolve())
-    log.info("pdf_arg=%s", args.pdf if args.pdf else "(auto-resolve from Email.json Attachments[])")
+    log.info(
+        "pdf_arg=%s",
+        args.pdf if args.pdf else "(auto-resolve from Email.json Attachments[])",
+    )
     log.info("out_dir=%s", out_dir)
     log.info("log_file=%s", log_file)
     log.info(
@@ -120,6 +109,27 @@ def main(argv: list[str] | None = None) -> int:
         os.getenv("INVOICE_EXTRACT_MODEL"),
     )
 
+
+def _log_artifacts(log: logging.Logger, artifacts: dict[str, Path]) -> None:
+    for name, path in artifacts.items():
+        marker = "OK" if path.is_file() else "MISSING"
+        log.info("artifact %s status=%s path=%s", name, marker, path)
+    log.info("===== invoice-intake run END =====")
+
+
+def _print_result(reply: str, artifacts: dict[str, Path]) -> None:
+    print(reply)
+    print()
+    print("Artifacts:")
+    for name, path in artifacts.items():
+        marker = "" if path.is_file() else "  (NOT WRITTEN)"
+        print(f"  {name}: {path}{marker}")
+
+
+def _run_intake_or_report(
+    log: logging.Logger, args: argparse.Namespace, out_dir: Path
+) -> tuple[int, object | None]:
+    """Returns ``(exit_code, result_or_None)``. Exit 0 ⇒ result is set."""
     try:
         client = _build_openai_client(log)
         result = run_intake(
@@ -131,23 +141,45 @@ def main(argv: list[str] | None = None) -> int:
     except (FileNotFoundError, ValueError) as exc:
         log.error("intake failed: %s", exc)
         print(f"ERROR: {exc}", file=sys.stderr)
-        return 1
+        return 1, None
     except Exception as exc:  # surface unexpected failures with a stack in the log
         log.exception("intake crashed: %s", exc)
         print(f"ERROR: {exc}", file=sys.stderr)
-        return 1
+        return 1, None
+    return 0, result
 
-    for name, path in result.artifacts.items():
-        marker = "OK" if path.is_file() else "MISSING"
-        log.info("artifact %s status=%s path=%s", name, marker, path)
-    log.info("===== invoice-intake run END =====")
 
-    print(result.agent_reply)
-    print()
-    print("Artifacts:")
-    for name, path in result.artifacts.items():
-        marker = "" if path.is_file() else "  (NOT WRITTEN)"
-        print(f"  {name}: {path}{marker}")
+def _validate_preconditions(args: argparse.Namespace) -> int | None:
+    if not os.getenv("OPENAI_API_KEY"):
+        print("ERROR: OPENAI_API_KEY is not set (see .env.example).", file=sys.stderr)
+        return 2
+    if not args.email.is_file():
+        print(f"ERROR: email file not found: {args.email}", file=sys.stderr)
+        return 2
+    return None
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = _parse_args(argv)
+    load_dotenv()
+
+    early_exit = _validate_preconditions(args)
+    if early_exit is not None:
+        return early_exit
+
+    out_dir = _resolve_out_dir(args.email, args.out_dir)
+    log_file = args.log_file if args.log_file is not None else out_dir / "run.log"
+
+    _configure_logging(log_file)
+    log = logging.getLogger("invoice_agent.cli")
+    _log_run_start(log, args, out_dir, log_file)
+
+    code, result = _run_intake_or_report(log, args, out_dir)
+    if code != 0 or result is None:
+        return code
+
+    _log_artifacts(log, result.artifacts)
+    _print_result(result.agent_reply, result.artifacts)
     return 0
 
 

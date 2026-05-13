@@ -53,7 +53,9 @@ def read_injection_signals() -> list[str]:
 # than overloading an existing one.
 _INJECTION_PATTERNS: Final[dict[str, re.Pattern[str]]] = {
     "ignore_prior_instructions": re.compile(
-        r"\bignore\s+(?:all\s+)?(?:previous|prior|above|earlier)\s+"
+        # Permit a short filler word (e.g. "the") between "ignore" and the
+        # priority keyword so "ignore the above messages" still trips.
+        r"\bignore\s+(?:all\s+|the\s+)?(?:previous|prior|above|earlier)\s+"
         r"(?:instructions?|prompts?|rules?|messages?)\b",
         re.IGNORECASE,
     ),
@@ -199,6 +201,56 @@ def _coerce_float(x: object) -> float | None:
     return None
 
 
+def _sum_amounts(items: object, key: str) -> tuple[float, bool]:
+    """Sum the floats found at ``items[i][key]``. Returns ``(total, any_seen)``."""
+    if not isinstance(items, list):
+        return 0.0, False
+    total = 0.0
+    seen = False
+    for entry in items:
+        if not isinstance(entry, dict):
+            continue
+        amt = _coerce_float(entry.get(key))
+        if amt is not None:
+            total += amt
+            seen = True
+    return total, seen
+
+
+def _check_totals_match(
+    subtotal: float | None, tax_sum: float, total_due: float | None
+) -> str | None:
+    if subtotal is None or total_due is None:
+        return None
+    if abs((subtotal + tax_sum) - total_due) > _ARITHMETIC_TOLERANCE:
+        return "totals_inconsistent"
+    return None
+
+
+def _check_line_items_match(
+    li_sum: float, li_any: bool, subtotal: float | None
+) -> str | None:
+    if subtotal is None or not li_any:
+        return None
+    if abs(li_sum - subtotal) > _ARITHMETIC_TOLERANCE:
+        return "line_items_sum_mismatch"
+    return None
+
+
+def _check_pattern(
+    value: object, pattern: re.Pattern[str], tag: str
+) -> str | None:
+    if isinstance(value, str) and value and not pattern.match(value):
+        return tag
+    return None
+
+
+def _check_negative_total(total_due: float | None) -> str | None:
+    if total_due is not None and total_due < 0:
+        return "negative_total_due"
+    return None
+
+
 def arithmetic_check(payload: dict[str, object]) -> list[str]:
     """Return short snake_case finding tags for arithmetic / format issues.
 
@@ -215,54 +267,18 @@ def arithmetic_check(payload: dict[str, object]) -> list[str]:
       - ``negative_total_due``            — total_due is < 0 (credit memo
                                             should be flagged for AP review)
     """
-    findings: list[str] = []
-
     subtotal = _coerce_float(payload.get("subtotal"))
     total_due = _coerce_float(payload.get("total_due"))
+    tax_sum, _ = _sum_amounts(payload.get("taxes") or [], "amount")
+    li_sum, li_any = _sum_amounts(payload.get("line_items") or [], "line_total")
 
-    taxes_raw = payload.get("taxes") or []
-    tax_sum = 0.0
-    if isinstance(taxes_raw, list):
-        for t in taxes_raw:
-            if isinstance(t, dict):
-                amt = _coerce_float(t.get("amount"))
-                if amt is not None:
-                    tax_sum += amt
-
-    line_items_raw = payload.get("line_items") or []
-    li_sum = 0.0
-    li_any = False
-    if isinstance(line_items_raw, list):
-        for li in line_items_raw:
-            if isinstance(li, dict):
-                lt = _coerce_float(li.get("line_total"))
-                if lt is not None:
-                    li_sum += lt
-                    li_any = True
-
-    if subtotal is not None and total_due is not None:
-        expected = subtotal + tax_sum
-        if abs(expected - total_due) > _ARITHMETIC_TOLERANCE:
-            findings.append("totals_inconsistent")
-
-    if subtotal is not None and li_any:
-        if abs(li_sum - subtotal) > _ARITHMETIC_TOLERANCE:
-            findings.append("line_items_sum_mismatch")
-
-    currency = payload.get("currency")
-    if isinstance(currency, str) and currency and not _ISO_CURRENCY_RE.match(currency):
-        findings.append("currency_not_iso_4217")
-
-    inv_date = payload.get("invoice_date")
-    if isinstance(inv_date, str) and inv_date and not _ISO_DATE_RE.match(inv_date):
-        findings.append("invoice_date_unparseable")
-
-    due_date = payload.get("due_date")
-    if isinstance(due_date, str) and due_date and not _ISO_DATE_RE.match(due_date):
-        findings.append("due_date_unparseable")
-
-    if total_due is not None and total_due < 0:
-        findings.append("negative_total_due")
-
-    return findings
+    candidates = [
+        _check_totals_match(subtotal, tax_sum, total_due),
+        _check_line_items_match(li_sum, li_any, subtotal),
+        _check_pattern(payload.get("currency"), _ISO_CURRENCY_RE, "currency_not_iso_4217"),
+        _check_pattern(payload.get("invoice_date"), _ISO_DATE_RE, "invoice_date_unparseable"),
+        _check_pattern(payload.get("due_date"), _ISO_DATE_RE, "due_date_unparseable"),
+        _check_negative_total(total_due),
+    ]
+    return [tag for tag in candidates if tag is not None]
 

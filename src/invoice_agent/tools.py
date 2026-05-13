@@ -15,9 +15,11 @@ from invoice_agent.guardrails import (
     apply_output_guardrails,
     read_injection_signals,
 )
+from invoice_agent._llm_params import llm_params
 from invoice_agent.models import DEFAULT_EXTRACT_MODEL, resolve_model
 from invoice_agent.pdf_extract import extract_pdf_content
 from invoice_agent.schema import InvoicePayload
+from invoice_agent.usage import extract_usage, write_extract_usage
 
 log = logging.getLogger(__name__)
 
@@ -68,6 +70,33 @@ def _user_payload(text: str, image_count: int) -> str:
     )
 
 
+def _extract_refusal(response: object) -> str | None:
+    """Return a refusal message string if the Structured Outputs response
+    was declined by the safety system, else None.
+
+    GPT-5 Structured Outputs surfaces refusals as a top-level ``refusal``
+    string on the response (or on individual output items). We look at
+    both shapes defensively because the SDK's exact attribute layout has
+    shifted between minor versions. Used to convert a refusal into a
+    risk_flag instead of an opaque parse error.
+    """
+    # Top-level refusal field.
+    top = getattr(response, "refusal", None)
+    if isinstance(top, str) and top.strip():
+        return top
+    # Newer SDKs: refusal lives inside response.output[*].content[*].refusal
+    output = getattr(response, "output", None)
+    if not output:
+        return None
+    for item in output:
+        content = getattr(item, "content", None) or []
+        for chunk in content:
+            r = getattr(chunk, "refusal", None)
+            if isinstance(r, str) and r.strip():
+                return r
+    return None
+
+
 @function_tool
 def extract_invoice_from_pdf(pdf_path: str) -> str:
     """Load a local invoice PDF, read text + embedded images, return JSON.
@@ -95,29 +124,61 @@ def _extract_invoice_from_pdf_impl(pdf_path: str) -> str:
     path = Path(pdf_path).expanduser().resolve()
     log.info("extract start pdf=%s model=%s", path, _EXTRACT_MODEL)
     content = extract_pdf_content(path)
-    img_dims = ", ".join(f"{i.width}x{i.height}" for i in content.images) or "(none)"
+    _log_pdf_parsed(content)
+
+    user_content = _build_extract_user_content(content)
+    params = llm_params(shot="extract", model=_EXTRACT_MODEL)
+    _log_extract_call(content, params)
+    response = _call_extract_model(user_content, params)
+
+    payload = response.output_parsed
+    if payload is None:
+        return _handle_missing_payload(response)
+    _log_extract_success(payload)
+    return payload.model_dump_json()
+
+
+def _log_pdf_parsed(content: object) -> None:
+    images = getattr(content, "images", [])
+    img_dims = ", ".join(f"{i.width}x{i.height}" for i in images) or "(none)"
     log.info(
         "pdf parsed pages=%d text_chars=%d images=%d image_dims=[%s]",
-        len(content.page_texts),
-        len(content.text),
-        len(content.images),
+        len(getattr(content, "page_texts", [])),
+        len(getattr(content, "text", "")),
+        len(images),
         img_dims,
     )
 
-    user_content: list[dict[str, object]] = [
-        {"type": "input_text", "text": _user_payload(content.text, len(content.images))}
-    ]
-    for img in content.images:
-        b64 = base64.b64encode(img.png_bytes).decode("ascii")
-        user_content.append(
-            {
-                "type": "input_image",
-                "image_url": f"data:image/png;base64,{b64}",
-            }
-        )
 
-    log.info("extract calling OpenAI responses.parse model=%s images_inlined=%d",
-             _EXTRACT_MODEL, len(content.images))
+def _build_extract_user_content(content: object) -> list[dict[str, object]]:
+    images = getattr(content, "images", [])
+    text = getattr(content, "text", "")
+    items: list[dict[str, object]] = [
+        {"type": "input_text", "text": _user_payload(text, len(images))}
+    ]
+    for img in images:
+        b64 = base64.b64encode(img.png_bytes).decode("ascii")
+        items.append(
+            {"type": "input_image", "image_url": f"data:image/png;base64,{b64}"}
+        )
+    return items
+
+
+def _log_extract_call(content: object, params: dict[str, object]) -> None:
+    log.info(
+        "extract calling OpenAI responses.parse model=%s images_inlined=%d "
+        "effort=%s max_tokens=%d safety_id=%s",
+        _EXTRACT_MODEL,
+        len(getattr(content, "images", [])),
+        params["reasoning"]["effort"],
+        params["max_output_tokens"],
+        params["safety_identifier"],
+    )
+
+
+def _call_extract_model(
+    user_content: list[dict[str, object]], params: dict[str, object]
+) -> object:
     client = OpenAI()
     response = client.responses.parse(
         model=_EXTRACT_MODEL,
@@ -126,15 +187,43 @@ def _extract_invoice_from_pdf_impl(pdf_path: str) -> str:
             {"role": "user", "content": user_content},
         ],
         text_format=InvoicePayload,
+        **params,
+    )
+    _publish_extract_usage(response)
+    return response
+
+
+def _publish_extract_usage(response: object) -> None:
+    """Best-effort: write the extract shot's token usage to OUT_DIR
+    so ``_IntakeRun`` can fold it into the per-run UsageMeter. Failures
+    are logged inside ``write_extract_usage`` and never raised.
+    """
+    usage = extract_usage(response)
+    if not usage:
+        return
+    out_dir = Path(os.getenv(OUT_DIR_ENV, ".")).expanduser().resolve()
+    write_extract_usage(out_dir, _EXTRACT_MODEL, usage)
+
+
+def _handle_missing_payload(response: object) -> str:
+    """Refusals → empty payload + risk_flag; everything else → raise."""
+    refusal = _extract_refusal(response)
+    if refusal is not None:
+        log.warning("extract MODEL REFUSED: %r", refusal[:300])
+        empty = InvoicePayload(
+            source_warnings=[f"model_refused_extraction: {refusal[:200]}"],
+            risk_flags=["model_refused_extraction"],
+        )
+        return empty.model_dump_json()
+    log.error("extract FAILED model=%s no parsed payload", _EXTRACT_MODEL)
+    raw = getattr(response, "output_text", "") or ""
+    raise RuntimeError(
+        "Extraction model returned no parsed payload; "
+        f"raw output: {raw[:500]!r}"
     )
 
-    payload = response.output_parsed
-    if payload is None:
-        log.error("extract FAILED model=%s no parsed payload", _EXTRACT_MODEL)
-        raise RuntimeError(
-            "Extraction model returned no parsed payload; "
-            f"raw output: {(response.output_text or '')[:500]!r}"
-        )
+
+def _log_extract_success(payload: InvoicePayload) -> None:
     log.info(
         "extract OK vendor=%r invoice_number=%r currency=%s total_due=%s "
         "subtotal=%s line_items=%d taxes=%d ship_to=%d notes=%d",
@@ -154,7 +243,6 @@ def _extract_invoice_from_pdf_impl(pdf_path: str) -> str:
         log.info("extract risk_flags=[] (none raised by extractor)")
     if payload.source_warnings:
         log.warning("extract source_warnings=%s", payload.source_warnings)
-    return payload.model_dump_json()
 
 
 def write_notification_files(
@@ -213,45 +301,13 @@ def _send_customer_service_notification_impl(
         "notify start summary_chars=%d payload_chars=%d out_dir=%s",
         len(summary_markdown), len(payload_json), out_dir,
     )
-    # Best-effort decision summary from the merged payload (does not
-    # mutate it). Failures here are non-fatal — write_notification_files
-    # still validates JSON and raises on real problems.
-    try:
-        parsed_preview = json.loads(payload_json)
-    except json.JSONDecodeError:
-        parsed_preview = None
+
+    parsed_preview = _try_parse_payload(payload_json)
     if isinstance(parsed_preview, dict):
-        flags = parsed_preview.get("risk_flags") or []
-        warnings = parsed_preview.get("source_warnings") or []
-        ec = parsed_preview.get("email_context") or {}
-        log.info(
-            "notify decision vendor=%r invoice_number=%r currency=%s total_due=%s "
-            "po=%r sender_domain=%r",
-            parsed_preview.get("vendor_name"),
-            parsed_preview.get("invoice_number"),
-            parsed_preview.get("currency"),
-            parsed_preview.get("total_due"),
-            ec.get("po_number") or ec.get("PO") if isinstance(ec, dict) else None,
-            ec.get("sender_domain") if isinstance(ec, dict) else None,
+        _log_notify_decision(parsed_preview)
+        final_summary, final_payload_json = _apply_guardrails_and_serialise(
+            summary_markdown, parsed_preview
         )
-        if flags:
-            log.warning("notify FORWARDED risk_flags=%s", flags)
-        if warnings:
-            log.warning("notify forwarded source_warnings=%s", warnings)
-    # --- Output guardrail (deterministic, post-LLM) -------------------
-    # Merge env-published input signals + scan the summary for unsafe
-    # auto-approval language. Additive: never removes existing flags.
-    input_signals = read_injection_signals()
-    if isinstance(parsed_preview, dict):
-        guarded_summary, guarded_payload, triggered = apply_output_guardrails(
-            summary_markdown=summary_markdown,
-            payload=parsed_preview,
-            input_signals=input_signals,
-        )
-        if triggered:
-            log.warning("guardrail output_scan FIRED triggered=%s", triggered)
-        final_summary = guarded_summary
-        final_payload_json = json.dumps(guarded_payload, ensure_ascii=False)
     else:
         # payload_json wasn't a dict — let write_notification_files raise
         # the canonical ValueError so we don't paper over malformed input.
@@ -263,3 +319,49 @@ def _send_customer_service_notification_impl(
     )
     log.info("notification written txt=%s json=%s", txt_path, json_path)
     return f"Notification written: {txt_path} and {json_path}"
+
+
+def _try_parse_payload(payload_json: str) -> object | None:
+    """Best-effort JSON parse for the decision-summary log path. Failures
+    are non-fatal — write_notification_files still validates and raises
+    on real problems."""
+    try:
+        return json.loads(payload_json)
+    except json.JSONDecodeError:
+        return None
+
+
+def _log_notify_decision(parsed: dict[str, object]) -> None:
+    ec_raw = parsed.get("email_context") or {}
+    ec = ec_raw if isinstance(ec_raw, dict) else {}
+    log.info(
+        "notify decision vendor=%r invoice_number=%r currency=%s total_due=%s "
+        "po=%r sender_domain=%r",
+        parsed.get("vendor_name"),
+        parsed.get("invoice_number"),
+        parsed.get("currency"),
+        parsed.get("total_due"),
+        ec.get("po_number") or ec.get("PO"),
+        ec.get("sender_domain"),
+    )
+    flags = parsed.get("risk_flags") or []
+    warnings = parsed.get("source_warnings") or []
+    if flags:
+        log.warning("notify FORWARDED risk_flags=%s", flags)
+    if warnings:
+        log.warning("notify forwarded source_warnings=%s", warnings)
+
+
+def _apply_guardrails_and_serialise(
+    summary_markdown: str, parsed: dict[str, object]
+) -> tuple[str, str]:
+    """Run the deterministic output guardrail and re-serialise the payload."""
+    input_signals = read_injection_signals()
+    guarded_summary, guarded_payload, triggered = apply_output_guardrails(
+        summary_markdown=summary_markdown,
+        payload=parsed,
+        input_signals=input_signals,
+    )
+    if triggered:
+        log.warning("guardrail output_scan FIRED triggered=%s", triggered)
+    return guarded_summary, json.dumps(guarded_payload, ensure_ascii=False)

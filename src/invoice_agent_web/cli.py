@@ -32,6 +32,10 @@ app = typer.Typer(
     name="infotech-email-agent",
     add_completion=False,
     rich_markup_mode="rich",
+    # Accept -h as an alias for --help on the root command and on every
+    # subcommand. Click's default only wires --help; -h is a near-universal
+    # convention so we register both.
+    context_settings={"help_option_names": ["-h", "--help"]},
     help=(
         "Launch the InfoTech invoice-intake dashboard "
         "(FastAPI + React, single port).\n\n"

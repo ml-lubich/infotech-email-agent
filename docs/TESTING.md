@@ -7,7 +7,6 @@
 - [End-to-end (uses OpenAI credit)](#end-to-end-uses-openai-credit)
 - [Regenerating synthetic fixtures](#regenerating-synthetic-fixtures)
 - [Side effects](#side-effects)
-- [Frontend e2e (Playwright, hermetic — no backend, no API credit)](#frontend-e2e-playwright-hermetic--no-backend-no-api-credit)
 - [What is intentionally NOT tested here](#what-is-intentionally-not-tested-here)
 
 ## Pytest module suite (no API credit)
@@ -16,8 +15,7 @@ The repo ships a module-level pytest suite under `tests/`. It exercises
 the pure / deterministic surfaces — no OpenAI calls, no agent runs.
 
 ```bash
-uv run pytest                       # local
-docker compose run --rm tests       # in the test image
+uv run pytest
 ```
 
 Coverage is **gated at 80% line + branch** (configured in
@@ -29,7 +27,7 @@ Coverage is **gated at 80% line + branch** (configured in
 through the Agents SDK's tool dispatcher; their work is covered via the
 `_impl` symbols).
 
-Current suite size: 262 collected tests across 21 test modules.
+Current suite size: 230 collected tests across 20 test modules.
 
 The web adapter (`src/invoice_agent_web/`) is an HTTP-and-CLI adapter
 layer (per `docs/ARCHITECTURE.md`); its Typer CLI is exercised by
@@ -142,11 +140,6 @@ Coverage map:
   approval") that MUST NOT trip the output guardrail, arithmetic
   tolerance + ISO format checks, and a 200 kB padding input that must
   scan in < 500 ms (catastrophic-backtracking guard).
-- `tests/test_web_run_log.py` — regression coverage for the dashboard
-  "Run log" tab. Asserts `_attach_run_log_handler` actually writes
-  pipeline log records into `<case_dir>/run.log` (so `IntakeResponse.log_tail`
-  is non-empty), and that `_read_log_tail` returns the requested tail
-  size and an empty string when no `run.log` exists.
 
 Side-effect policy: file-writing tests use real `tmp_path` writes — the
 filesystem is not mocked (see "Side effects" below). The autouse
@@ -238,65 +231,6 @@ sample and is never touched.
 
 The notify tool writes real files; do not mock the filesystem. Tests that
 assert artifact shape must read the actual written files under `./out/`.
-
-## Frontend e2e (Playwright, hermetic — no backend, no API credit)
-
-The React dashboard under `frontend/` ships a Playwright suite at
-`frontend/tests/e2e/`. It runs against the **production** `vite preview`
-build (`dist/`), so we test the same bundle we ship.
-
-**Hermetic by construction.** The suite never reaches the FastAPI
-backend and never burns OpenAI credit. Every `/api/**` request is
-intercepted in-browser via `page.route()` from
-`frontend/tests/e2e/fixtures/mocks.ts`. A catch-all `**/api/**` route
-is registered FIRST (Playwright runs handlers in reverse registration
-order — so specific handlers registered after it win) and returns HTTP
-599 — any unmocked call fails the test loudly instead of silently
-hitting a real server.
-
-```bash
-cd frontend
-bun install                       # one-time
-bun run test:e2e:install          # one-time: download chromium
-bun run test:e2e                  # headless run
-bun run test:e2e:ui               # Playwright UI mode for debugging
-bun run ci                        # lint + build + e2e (used in CI)
-```
-
-Coverage (7 specs in `tests/e2e/dashboard.spec.ts`):
-
-- Header heading + health pill (healthy: "LLM active · key OK").
-- Degraded backend (no `OPENAI_API_KEY`) — pill flips to
-  "deterministic only · no OPENAI_API_KEY".
-- Shipped-example list rendering (one button per mocked case) and the
-  empty results state until a run is dispatched.
-- Running a shipped example → confidence gauge, risk-flag chips
-  (incl. high-risk `bank_account_change_requested`), three-shot
-  pipeline timeline (`extract`, `verify_extraction`, `injection_screen`),
-  invoice card with vendor / invoice # / `$1,234.56` total.
-- Upload flow — `Run intake` button stays **disabled** until an
-  `Email.json` is dropped on the hidden `<input type="file">`; once
-  dropped + clicked, the mocked intake response renders.
-- Backend error path — 500 / `{"error": …}` is surfaced as the red
-  banner and **no** result card is rendered.
-- Theme toggle flips `data-theme` on `<html>` and persists the choice
-  to `localStorage["iia-theme"]`.
-- JPY currency formatting — `Intl.NumberFormat` renders `¥13,200`
-  with no decimal subunit (regression guard for `case_7_jpy_no_decimals`).
-
-Hardening:
-
-- TZ pinned to `America/Los_Angeles` via `test.use({ timezoneId })` so
-  any date-only formatting is deterministic across CI / laptops.
-- `pageerror` listener throws — any uncaught browser error fails the
-  test (catches React render crashes a snapshot suite would miss).
-- Headless chromium only (one project). CI gets `retries: 2`,
-  `trace: on-first-retry`, screenshots + videos on failure.
-- `webServer` auto-launches `vite preview --strictPort` on `127.0.0.1`
-  and tears it down at the end of the run.
-
-Artifacts (`test-results/`, `playwright-report/`, `playwright/.cache/`)
-are git-ignored.
 
 ## What is intentionally NOT tested here
 

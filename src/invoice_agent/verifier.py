@@ -25,7 +25,7 @@ Architectural notes:
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING, Callable, Final, Literal
+from typing import TYPE_CHECKING, Final, Literal
 
 from pydantic import BaseModel, Field
 
@@ -35,10 +35,6 @@ from invoice_agent.models import resolve_model
 
 if TYPE_CHECKING:
     from openai import OpenAI
-
-# Callback shape: receives the raw OpenAI Responses-API response so the
-# caller (typically a UsageMeter.sink_for(...)) can pull token counts.
-UsageSink = Callable[[object], None]
 
 log = logging.getLogger(__name__)
 
@@ -105,7 +101,6 @@ def verify_extraction(
     pdf_text: str,
     client: "OpenAI",
     model: str | None = None,
-    usage_sink: UsageSink | None = None,
 ) -> VerificationReport:
     """Run the verifier and return a parsed report.
 
@@ -114,9 +109,6 @@ def verify_extraction(
         pdf_text: Raw PDF text from `pdf_extract.extract_pdf_content`.
         client: An OpenAI client (injected for testability).
         model: Optional override; must be allow-listed.
-        usage_sink: Optional one-arg callback invoked with the raw
-            Responses-API response so a ``UsageMeter`` can record
-            token usage. Default ``None`` = no observability hook.
 
     Raises:
         ValueError: ``model`` is not in the allow-list.
@@ -139,11 +131,6 @@ def verify_extraction(
             text_format=VerificationReport,
             **params,
         )
-        if usage_sink is not None:
-            try:
-                usage_sink(response)
-            except Exception as exc:  # noqa: BLE001 — observability must not break pipeline
-                log.warning("verify usage_sink failed: %s", exc)
         parsed = response.output_parsed
         if parsed is None:
             raise RuntimeError(
@@ -198,15 +185,11 @@ def injection_screen(
     text: str,
     client: "OpenAI | None",
     model: str,
-    usage_sink: UsageSink | None = None,
 ) -> list[str]:
     """Run the LLM injection-screen shot. Returns finding tags.
 
     Returns ``[]`` (and skips the call) when ``client`` is ``None`` or
     the supplied text is empty/whitespace.
-
-    ``usage_sink`` (optional) receives the raw Responses-API response
-    so callers can record token usage; default ``None`` = no hook.
     """
     if client is None:
         return []
@@ -226,11 +209,6 @@ def injection_screen(
             text_format=_InjectionVerdict,
             **params,
         )
-        if usage_sink is not None:
-            try:
-                usage_sink(response)
-            except Exception as exc:  # noqa: BLE001 — observability must not break pipeline
-                log.warning("injection_screen usage_sink failed: %s", exc)
         return response.output_parsed
 
     parsed = retry_call(_call, label="injection")

@@ -19,7 +19,6 @@ from invoice_agent._llm_params import llm_params
 from invoice_agent.models import DEFAULT_EXTRACT_MODEL, resolve_model
 from invoice_agent.pdf_extract import extract_pdf_content
 from invoice_agent.schema import InvoicePayload
-from invoice_agent.usage import extract_usage, write_extract_usage
 
 log = logging.getLogger(__name__)
 
@@ -180,7 +179,7 @@ def _call_extract_model(
     user_content: list[dict[str, object]], params: dict[str, object]
 ) -> object:
     client = OpenAI()
-    response = client.responses.parse(
+    return client.responses.parse(
         model=_EXTRACT_MODEL,
         input=[
             {"role": "system", "content": _SYSTEM},
@@ -189,20 +188,6 @@ def _call_extract_model(
         text_format=InvoicePayload,
         **params,
     )
-    _publish_extract_usage(response)
-    return response
-
-
-def _publish_extract_usage(response: object) -> None:
-    """Best-effort: write the extract shot's token usage to OUT_DIR
-    so ``_IntakeRun`` can fold it into the per-run UsageMeter. Failures
-    are logged inside ``write_extract_usage`` and never raised.
-    """
-    usage = extract_usage(response)
-    if not usage:
-        return
-    out_dir = Path(os.getenv(OUT_DIR_ENV, ".")).expanduser().resolve()
-    write_extract_usage(out_dir, _EXTRACT_MODEL, usage)
 
 
 def _handle_missing_payload(response: object) -> str:

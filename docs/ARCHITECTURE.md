@@ -95,20 +95,18 @@ main.py  ──►  invoice_agent.cli.main()
 |---|---|
 | `invoice_agent/cli.py` | Argparse, .env, logging, exit codes. |
 | `invoice_agent/agent.py` | Agent assembly + multi-shot pipeline driver (`run_intake`). |
-| `invoice_agent/pipeline.py` | `PipelineState` confidence ledger; per-shot decision records. Each `Shot` carries `findings: list[str]` (the snake_case finding tags) and **`evidence: list[Evidence]`** (the AP-facing pointer back to the exact substring that triggered each finding — additive, defaults to `[]`). |
-| `invoice_agent/evidence.py` | **Pure helpers** that turn a finding tag + its source text into an `Evidence` entry: regex-window quotes for `_INJECTION_PATTERNS` matches, structured quotes for verifier `Disagreement`s, numeric reconstructions for `arithmetic_check`. No I/O, no LLM. The same compiled regexes from `guardrails` are re-used (single source of truth). |
+| `invoice_agent/pipeline.py` | `PipelineState` confidence ledger; per-shot decision records. |
 | `invoice_agent/guardrails.py` | Deterministic guardrails: input/output injection scan, `arithmetic_check`. |
 | `invoice_agent/verifier.py` | LLM critic (`verify_extraction`) + LLM `injection_screen` (gpt-5-nano). |
 | `invoice_agent/tools.py` | The two `@function_tool`s (extract + notify). |
 | `invoice_agent/pdf_extract.py` | Deterministic PDF text + image extraction. |
-| `invoice_agent/schema.py` | Pydantic `InvoicePayload` + nested models, plus the additive `Evidence` model (`finding`, `source`, `quote`, `location`) used by `pipeline.Shot.evidence`. |
+| `invoice_agent/schema.py` | Pydantic `InvoicePayload` + nested models. |
 | `invoice_agent/models.py` | Allow-list (`gpt-5-mini` / `gpt-5-nano`) + default model constants. |
 | `invoice_agent/_retry.py` | Bounded retry helper (LLM + OCR shots). Single source of truth for retry policy. |
 | `invoice_agent/_llm_params.py` | Single source of truth for the 2026 GPT-5 safety / cost knobs forwarded on every `responses.parse(...)` call: `reasoning.effort`, `text.verbosity`, `max_output_tokens`, `safety_identifier`, `prompt_cache_key`. Per-shot defaults: extract = `minimal` effort + 2048 tokens; verify = `low` effort + 1024 tokens; injection = `minimal` effort + 256 tokens. |
 | `invoice_agent_web/main.py` | **HTTP adapter** (FastAPI). Exposes `/api/health`, `/api/examples`, `/api/intake` (multipart upload), `/api/intake/example`. When `frontend/dist/` exists, also mounts the React bundle at `/` and `/assets/*` so the whole app runs on one port. Owns no business logic — stages inputs into a per-request case dir under `out/web/` and calls `invoice_agent.agent.run_intake`. Sync handlers (Agents SDK `Runner.run_sync` cannot run inside an active event loop). |
 | `invoice_agent_web/cli.py` | **Typer CLI** (console-script `infotech-email-agent`). Subcommands: `up` (build frontend + serve everything), `dev` (backend with reload + Vite-dev instructions), `doctor` (env / deps), `version`. Prints ASCII banner + colour diagnostics. |
 | `frontend/` | React + Vite + TypeScript dashboard. Renders the confidence gauge, per-shot timeline, risk-flag chips, extracted invoice, and outbound packet (txt / JSON / log) returned by `/api/intake`. Dev server (`bun run dev`) proxies `/api/*` to the FastAPI backend. See `frontend/README.md`. |
-| `Dockerfile` / `docker-compose.yml` / `.dockerignore` | **Containerization layer.** Multi-stage build (`frontend` via `oven/bun` → `base` via `python:3.12-slim` + `uv sync --frozen --no-dev` + `tesseract-ocr` → `runtime` exposing `:8000` → `test` running `uv run pytest -q`). The `runtime` target runs `infotech-email-agent up --no-browser`; the `test` target is invoked via `docker compose run --rm tests`. No business logic lives here — pure packaging. See `docs/RUNBOOK.md`. |
 
 ## Data flow (sequence)
 

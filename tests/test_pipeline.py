@@ -350,9 +350,15 @@ def test_run_intake_pipeline_critic_and_injection_with_client(
     )
     data = json.loads((out_dir / "outbound_email.json").read_text(encoding="utf-8"))
     flags = data["risk_flags"]
+    # Verifier disagreement carries a citable v1 vs suggested cite -> kept.
     assert "verifier_disagreement_total_due" in flags
-    assert "low_confidence_vendor_name" in flags
-    assert "prompt_injection_attempt_in_document" in flags
+    # Citable-evidence gate: low_confidence grades have no anchored quote
+    # in the source text, so they are dropped from risk_flags (they are
+    # still surfaced as an INFO log line on the same shot).
+    assert "low_confidence_vendor_name" not in flags
+    # The aggregate injection tag has no regex anchor and no
+    # deterministic agreement on this stub text -> dropped.
+    assert "prompt_injection_attempt_in_document" not in flags
     # Pipeline records 6 shots total (0..5).
     assert len(data["pipeline"]["shots"]) == 6
 

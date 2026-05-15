@@ -13,13 +13,19 @@ services:
     image: infotech-agent:latest
     container_name: infotech-agent
     ports:
-      - "8000:8000"
+      # Host port is overridable via $HOST_PORT (set by
+      # `infotech-email-agent docker up --port N`). Container port stays 8000.
+      - "${HOST_PORT:-8000}:8000"
     env_file:
       - .env                 # must contain OPENAI_API_KEY=...
     environment:
       INVOICE_WEB_HOST: "0.0.0.0"
       INVOICE_WEB_PORT: "8000"
     volumes:
+      # Mount the project config so edits on the host are picked up by the
+      # container without a rebuild. Inspect with:
+      #   docker compose exec agent uv run infotech-email-agent config show
+      - ./config:/app/config:ro
       # Persist per-request case outputs on the host so you can inspect
       # `outbound_email.{txt,json}` and `run.log` after a session.
       - ./out:/app/out

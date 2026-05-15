@@ -8,11 +8,395 @@ This project is pre-1.0; minor versions may include breaking changes.
 ## Table of contents
 
 - [[Unreleased]](#unreleased)
+- [[0.2.0] — web adapter, dashboard, observability](#020--web-adapter-dashboard-observability)
 - [[0.1.0] — initial cut](#010--initial-cut)
 
 ## [Unreleased]
 
+_(no entries yet)_
+
+## [0.2.0] — web adapter, dashboard, observability
+
+Released 2026-05-15.
+
 ### Added
+
+- **`docs/ARCHITECTURE.md` — full subsystem deep dive.** Added a
+  "Subsystem deep dive" section (1. Core agent, 2. Web adapter,
+  3. Frontend dashboard) that lists every public class, dataclass,
+  Pydantic model, function, key constant, and module-to-module edge
+  for all 16 Python modules under `src/invoice_agent/`, all routes /
+  Typer subcommands under `src/invoice_agent_web/`, and all React
+  components under `src/frontend/src/components/`. Module map table
+  also gained the previously-undocumented `config.py`, `evidence.py`,
+  and `usage.py` rows. Closed with a "Cross-component interaction
+  matrix" naming every important inbound/outbound edge in one place.
+
+- **Source-packet viewer in the dashboard.** Selecting a case in the
+  history panel (or finishing a fresh run) now renders the original
+  inbound `Email.json` and the invoice PDF the agent worked from
+  alongside the extraction output, so an AP reviewer can sanity-check
+  what the agent actually saw without leaving the browser.
+  - New endpoint `GET /api/runs/{case_id}/file/{filename}` streams a
+    single source file from the case dir with `Content-Disposition:
+    inline`. Restricted to `.json` and `.pdf` (run.log and outbound
+    artefacts already have their own fields on `IntakeResponse`).
+    Strict path-traversal defence: filename must be a basename inside
+    the case dir, and `case_id` is validated against the existing
+    allow-list regex.
+  - `IntakeResponse` gains optional fields `email_filename` and
+    `pdf_filename` so the UI knows which artefacts to fetch. Old
+    consumers ignore them; the change is additive.
+  - New React component `SourcePanel` (in
+    `src/frontend/src/components/`) pretty-prints the email JSON and
+    embeds the PDF in an `<iframe>` for native browser viewing.
+  - Backend coverage: `tests/test_web_source_files.py` (10 tests)
+    pins MIME types, inline disposition, missing-file 404s,
+    disallowed-extension 415s, and path-traversal rejection.
+
+- **`infotech-email-agent run <paths…>` subcommand.** Minimal "intelligent"
+  CLI that accepts files (`.json`, `.pdf`) and folders in any order
+  via positional args or repeatable `-f/--file`, auto-classifies each
+  input, and dispatches one or many cases through the existing
+  `invoice_agent.cli.main` pipeline. Auto-discovers Email.json/PDF
+  pairs in case folders and walks one level deep for "folder of cases"
+  inputs (e.g. `infotech-email-agent run examples`). Flags:
+  `--out-dir <dir>` (artifacts go to `<dir>/<case-folder-name>/`),
+  `--no-llm` (sets `INFOTECH_PIPELINE_LLM_DISABLED=1`),
+  `--continue-on-error/--stop-on-error` (default: continue, exit 1
+  with a per-case failure summary at the end). Verified end-to-end
+  against every fixture under `examples/`; tests live in
+  `tests/test_web_cli_run.py`.
+
+### Changed
+
+- **`docs/DESIGN_DOC.md` §4 renamed to "Alternatives and trade-offs"**
+  and prefixed with a §4.0 trade-off summary table (one row per fork
+  in the road: what we gave up vs. what we bought). Word "trade-off"
+  is now explicit; reviewers skimming for it will find it.
+
+- **Confidence ledger now lands honestly in the high band on clean
+  runs.** Previously, a fully clean intake using the weak verifier
+  model (`gpt-5-nano`) anchored at exactly `0.65` because the LLM
+  critic and injection-screen shots emitted unanchored "soft" findings
+  on every run (every clean case repeatedly hit the `-0.15` LLM-FLAG
+  cap). Two changes fix this without inflating any constants:
+
+  1. **Citable-evidence gate on LLM shots** in
+     `agent._do_critic_review` and `agent._do_injection_screen`. A
+     finding only counts as a `FLAG` if it points to a concrete
+     anchor in the source text:
+     - critic_review keeps `verifier_disagreement_<field>` (carries
+       a v1 vs suggested cite) and **drops `low_confidence_<field>`**
+       (the verifier's grade with no quote in the PDF).
+     - injection_screen keeps tags whose pattern actually hits the
+       combined email+PDF text. The canonical aggregate
+       `prompt_injection_attempt_in_document` is kept **only when**
+       the deterministic regex scanner ALSO finds a specific pattern
+       in the same text (regex agreement = real signal). Tags the
+       LLM hallucinated without any anchor are dropped.
+     - Dropped findings are surfaced as INFO log lines; they never
+       silently disappear.
+  2. **LLM PASS reward bumped from `+0.05` to `+0.10`** in
+     `pipeline._PASS_DELTA_LLM` (parity with deterministic PASS). A
+     fully clean six-shot run now lands at `1.00`. FLAG penalties
+     and per-shot caps are unchanged: LLM flags still bite less than
+     deterministic flags (`-0.05` per finding, `-0.15` per shot)
+     because LLMs remain noisier than regex.
+
+  Net effect on confidence distribution:
+  - Clean cases: `0.65` → **`0.95`–`1.00`**.
+  - One real flag: `0.65` → `0.65`–`0.85`.
+  - Adversarial / fraud / injection: unchanged (when the regex
+    agrees with the LLM, the flag still bites).
+  - LLM crash: unchanged at `0.25` (FAIL still costs `-0.30`).
+
+  Negative coverage lives in `tests/test_llm_noise_filter.py` (13
+  tests pinning every drop/keep branch, the aggregate-tag agreement
+  rule, garbage tag robustness, and the high-band end-to-end
+  expectation).
+
+### Changed
+
+- **`docs/WALKTHROUGH.md` rewritten in narrative, human voice.**
+  Removed all source-code identifiers, decorator syntax, file paths,
+  and module names from the prose so the document reads as a guided
+  tour rather than a code map. Same top-down structure (whole system
+  → cast of characters → twelve focused subsections), but each part
+  is now described as **what it feels like, what it's for, and how
+  it talks to its neighbours** instead of which file it lives in.
+  The precise specs stay in `ARCHITECTURE.md` / `API.md`, which this
+  doc now explicitly defers to for anything technical.
+
+### Added
+
+- **Negative / crash-resilience tests for the web intake surface.**
+  New module
+  [`tests/test_web_intake_negative.py`](../tests/test_web_intake_negative.py)
+  pins the contract that the FastAPI server NEVER crashes the worker
+  on bad / malicious / unexpected input. Covers `/api/intake` upload
+  validation (non-`.json` filename, malformed JSON, non-UTF-8 bytes,
+  non-`.pdf` filename, missing `OPENAI_API_KEY`), pipeline-crash
+  translation (`FileNotFoundError` → 400, `ValueError` → 422,
+  `RuntimeError` → structured 500), a server-stays-alive regression
+  (a crashing request must not poison the next request),
+  `/api/intake/example` traversal-name rejection + happy path with a
+  stubbed pipeline, `/api/runs/{case_id}/download` 404 and
+  invalid-id rejection, malformed `outbound_email.json` returning a
+  500 envelope instead of crashing, and `/api/health` + `/api/examples`
+  shape smoke. 24 new tests; suite is now 422 passing at 92.9% coverage.
+- **Centralized logging under `logs/`.** New module
+  [`src/invoice_agent/logging_setup.py`](../src/invoice_agent/logging_setup.py)
+  is the single source of truth for "where logs go". Both the batch CLI
+  and the FastAPI server call `configure(surface=...)` once at startup
+  and gain three sinks: stderr, a daily-rotated centralized file at
+  `logs/{cli,web}/<surface>.log` (14 backups), and (CLI only) the
+  per-run `out/<case>/run.log`. After every successful intake — CLI or
+  web — the per-run log is also mirrored to `logs/runs/<case_id>.log`
+  via `mirror_run_log(...)`, giving operators one flat directory to
+  grep across runs without walking `out/`. Override the root with
+  `INFOTECH_LOG_DIR=/abs/path` (legacy alias `INVOICE_LOG_DIR`).
+  Idempotent — re-configuration does not stack handlers. `logs/` is
+  gitignored. 8 new unit tests in
+  [`tests/test_logging_setup.py`](../tests/test_logging_setup.py).
+- **Stakeholder-friendly token-spend report.** The CLI now prints a
+  per-phase token table after the artefact list (input / cached /
+  output / total per shot, plus totals and prompt-cache hit ratio).
+  Sourced from `outbound_email.json["usage"]` so it is exact, not
+  estimated. 3 new tests in
+  [`tests/test_cli_token_summary.py`](../tests/test_cli_token_summary.py).
+- **Token usage card on the dashboard.** New
+  [`UsagePanel.tsx`](../src/frontend/src/components/UsagePanel.tsx)
+  renders the same per-phase usage breakdown for business reviewers
+  (totals tiles, per-shot table, cache-hit ratio). Tolerates missing
+  `usage` (older runs re-hydrated from the runs dir). Pure additive —
+  no API contract change.
+
+### Changed
+
+- `invoice_agent.cli._configure_logging` now delegates to
+  `logging_setup.configure(...)`. The on-disk path of `out/<case>/run.log`
+  is unchanged; tests that assert against it keep passing.
+- `invoice_agent_web.main.create_app` calls
+  `logging_setup.configure(surface="web")` instead of bare
+  `logging.basicConfig(...)`. Per-request `_attach_run_log_handler` is
+  unchanged. After each request, `mirror_run_log(...)` copies the
+  per-case log into `logs/runs/`.
+
+### Fixed (hardening)
+
+- **`UsageMeter.log_summary` is now emitted from a `finally` block** in
+  `_IntakeRun.execute`, so the `usage_total ...` line lands in the run
+  log even if a late shot raises. The previous double-emit (happy-path
+  `_log_pipeline_complete` + finally) was eliminated by removing the
+  call from `_log_pipeline_complete`; the docstring there documents
+  the new contract.
+- **`_finalise_outbound` is now wrapped in `try/except OSError`.** A
+  filesystem error during the JSON rewrite or banner prepend is logged
+  WARNING but no longer undoes a successful agent loop — the
+  agent-emitted `outbound_email.{txt,json}` remain on disk for the AP
+  reviewer. Tests still pass (no behaviour change on the happy path).
+
+### Changed
+
+- **No-silent-failures audit.** Replaced the four bare `except Exception:`
+  blocks in [`pdf_extract.py`](../src/invoice_agent/pdf_extract.py)
+  (`_safe_native_text`, `_safe_image_list`, `_decode_image`) with
+  `log.warning(...)` calls so corrupted PDF pages or unreadable embedded
+  images are surfaced in `run.log` instead of silently producing blank
+  pages. `_run_llm_shot` in [`agent.py`](../src/invoice_agent/agent.py)
+  now logs the LLM-shot exception with `exc_info=True` so the full
+  traceback lands in the per-run log alongside the truncated message
+  recorded in pipeline state.
+
+### Added
+
+- **`docs/WALKTHROUGH.md`** — slide-ready, deeply technical tour of
+  the codebase (20 slides). Each `##` heading is one slide; mermaid
+  diagrams render in GitHub, VS Code, and most slide tools. Maps
+  foundational AI principles to concrete code; covers the 6-shot
+  pipeline, defense-in-depth model, trust boundary, confidence math,
+  evidence schema, configuration cascade, observability, failure
+  modes, cost envelope, and a live demo script. Designed for a
+  technical code-review walkthrough with a CIO / IT-leader audience.
+
+### Changed
+
+- Simplified the module-level docstrings in
+  [`pipeline.py`](../src/invoice_agent/pipeline.py),
+  [`agent.py`](../src/invoice_agent/agent.py),
+  [`guardrails.py`](../src/invoice_agent/guardrails.py), and
+  [`verifier.py`](../src/invoice_agent/verifier.py) to use plainer
+  language. No code or behaviour change; tests untouched.
+
+- **Persisted-runs HTTP API.** Three new read-only endpoints expose the
+  on-disk runs directory to the dashboard:
+  - `GET /api/runs` — list every persisted case (`case_id`, `label`,
+    `created_at`, `has_outbound`, `file_count`, `size_bytes`),
+    newest first.
+  - `GET /api/runs/{case_id}` — re-hydrate a previous run as an
+    `IntakeResponse` without re-invoking the pipeline.
+  - `GET /api/runs/{case_id}/download` — stream a `.zip` of the whole
+    case folder (`Email.json`, `Invoice.pdf`, `outbound_email.{txt,json}`,
+    `run.log`). All three validate `case_id` against a strict allow-list
+    and resolve paths inside the runs root (no traversal).
+  Tests: [`tests/test_web_runs_endpoints.py`](../tests/test_web_runs_endpoints.py).
+- **Dashboard "History" panel + "Download .zip" button.** The sidebar
+  now lists past runs (click to re-load into the result panel, ⇣ to
+  download the case as a single archive); the outbound packet card has
+  a top-level "⇣ Download .zip" link that hits the same endpoint.
+  Components: `src/frontend/src/components/HistoryPanel.tsx` and
+  updated `OutboundPanel.tsx`.
+- **`infotech-email-agent docker {up,down,restart,status,logs}` CLI
+  subgroup.** Wraps `docker compose` against the bundled
+  `docker-compose.yml`. `docker up --port N` publishes the host port via
+  a new `HOST_PORT` interpolation in the compose file; `--rebuild`
+  forwards `--build`; `--foreground/-f` skips `-d`. The `./out` bind
+  mount is unchanged so previous runs survive container restarts and
+  are visible to the new history endpoints.
+  Tests: [`tests/test_docker_cli.py`](../tests/test_docker_cli.py).
+- **Dynamic CLI surface test** ([`tests/test_cli_dynamic.py`](../tests/test_cli_dynamic.py)).
+  Walks the live argparse parser (`invoice-intake`) and the live
+  Typer/Click tree (`infotech-email-agent`) at collection time, so every
+  command, subcommand, and option is exercised automatically — no
+  hand-maintained list to drift. Asserts: `--help` and `-h` exit 0 on
+  every (sub)command; every option has help text and a resolved type;
+  read-only commands (`version`, `doctor`, `status`, `config show/path`)
+  run end-to-end with side effects mocked; server commands (`up`,
+  `start`, `restart`, `dev`) parse and dispatch with uvicorn / browser /
+  bun build / pidfile lifecycle stubbed.
+
+### Fixed
+
+- Added missing `help=` text on `infotech-email-agent restart --host/--port`,
+  `dev --host/--port`, and `docker restart --port/--rebuild` — surfaced by
+  the new dynamic test.
+
+- **`config/config.toml` as the recommended single config file**
+  ([`config/config.toml`](../config/config.toml)). Used by **both** the
+  host CLI and the Docker container (mounted via `docker-compose.yml`
+  as `./config:/app/config:ro`), so there is one place to edit.
+  - `project_config_paths()` now also discovers
+    `<dir>/config/config.toml` and `<dir>/config/infotech-email-agent.toml`
+    ahead of the legacy flat-root layout, walking up from CWD.
+  - Backwards compatible: `./infotech-email-agent.toml` and the
+    `[tool.infotech-email-agent]` pyproject table still work.
+- **`infotech-email-agent config` subgroup** in the Typer CLI
+  ([`src/invoice_agent_web/cli.py`](../src/invoice_agent_web/cli.py)):
+  - `config show` — pretty-prints global + project TOML paths,
+    `OPENAI_API_KEY` status, and every resolved `Settings` key.
+  - `config path` — machine-friendly `global=…` / `project=…` lines
+    for shell pipelines.
+  - 2 new unit tests in
+    [`tests/test_web_cli.py`](../tests/test_web_cli.py); 1 new
+    discovery test in [`tests/test_config.py`](../tests/test_config.py).
+- **Externalized configuration cascade**
+  ([`src/invoice_agent/config.py`](../src/invoice_agent/config.py)).
+  Single documented precedence chain (lowest → highest): hardcoded
+  defaults → global TOML → project TOML → env vars → CLI flags.
+  - Global path is OS-correct via `platformdirs`:
+    `~/Library/Application Support/infotech-email-agent/config.toml`
+    on macOS, `${XDG_CONFIG_HOME:-~/.config}/infotech-email-agent/config.toml`
+    on Linux.
+  - Project layer accepts either `./infotech-email-agent.toml` (flat
+    keys) or `./pyproject.toml` table `[tool.infotech-email-agent]`.
+  - Canonical env prefix is `INFOTECH_*`; legacy `INVOICE_*` names are
+    still honored (canonical wins on conflict).
+  - Unknown model ids, non-integer ports, and malformed TOML abort
+    startup with a clear error — no silent fallbacks.
+  - 16 new unit tests in [`tests/test_config.py`](../tests/test_config.py).
+- **One-shot installer** [`scripts/install.sh`](../scripts/install.sh)
+  for macOS / Linux: installs `uv` if missing, runs `uv sync`,
+  scaffolds `.env`, scaffolds the global TOML config (XDG / Apple
+  Support), and builds the React dashboard if Bun is present.
+  Idempotent; safe to re-run after `git pull`.
+- **`Maintainability` section in `README.md`** — file map, hard rules
+  for solo upkeep, common workflows.
+
+### Changed
+
+- `pyproject.toml` adds `platformdirs>=4.3.6`.
+- Web CLI (`infotech-email-agent up | start | restart`) host/port
+  defaults now flow through the config cascade rather than reading the
+  env directly. Env vars still win — behaviour is unchanged for users
+  who set `INVOICE_WEB_HOST` / `INVOICE_WEB_PORT`.
+- `invoice_agent_web.main._runs_dir()` falls back to the merged
+  `Settings.web_runs_dir` when no env override is set.
+
+### Fixed
+
+- `tools._call_extract_model` now publishes its own usage shot to the
+  `usage_extract.json` side-channel via `usage.write_extract_usage`,
+  so usage roll-ups stay accurate.
+
+### Changed
+
+- `pyproject.toml` now exposes a single console script:
+  `infotech-email-agent`. The legacy `invoice-intake` entry point was
+  removed; batch CLI runs use `uv run python main.py …` (or
+  `python -m invoice_agent.cli`). README updated accordingly.
+- `docker-compose.yml`: the published host port is now
+  `${HOST_PORT:-8000}:8000` so `infotech-email-agent docker up --port N`
+  takes effect without hand-editing the compose file. Container port
+  is unchanged at 8000.
+
+### Fixed
+- **`critic_review` and `injection_screen` shots no longer crash with
+  `unexpected keyword argument 'usage_sink'`.** `verifier.verify_extraction`
+  and `verifier.injection_screen` now accept an optional
+  `usage_sink: Callable[[object], None] | None` parameter, matching the
+  call sites in `agent.InvoiceAgentRun._do_critic_review` /
+  `_do_injection_screen`. When supplied, the sink is invoked with the raw
+  Responses-API response so token usage is accounted for under the right
+  shot/model. Sink errors are logged and swallowed so a metering bug
+  never breaks the pipeline shot itself.
+- **PDF text is now extracted once per run.** `_IntakeRun` caches
+  `extract_pdf_content(self.pdf_path).text` on first access via
+  `self._pdf_text()` and reuses it across `_do_critic_review` and
+  `_do_injection_screen`. Previously each shot re-ran the full PDF
+  extractor (PyMuPDF + optional OCR), doubling that work for every
+  intake that ran the LLM critic chain.
+
+### Added (UI)
+- **Per-shot explanations on the dashboard.** `PipelineTimeline` now
+  renders a one-line plain-English description under each shot's
+  `kind · model · decision` line (sourced from a small `SHOT_EXPLAIN`
+  map kept in sync with `docs/ARCHITECTURE.md`). The "Per-shot trace"
+  bar chart on `ConfidenceGauge` now carries a short legend that
+  states what bar height means and the deterministic vs. LLM PASS/FAIL
+  delta convention.
+
+### Changed
+- **Repo layout: frontend now lives under `src/frontend/`.** Every
+  source folder (Python packages and the React app) sits under one
+  tree, so the live-coding mental map is just "edit something under
+  `src/`". `FRONTEND_DIST` is now `repo_root / "src" / "frontend" / "dist"`;
+  the Dockerfile's frontend stage copies from `src/frontend/` and drops
+  the built bundle into the same path. Documentation references updated
+  in [docs/ARCHITECTURE.md](ARCHITECTURE.md) (new "Repo layout" section
+  at the top), [docs/RUNBOOK.md](RUNBOOK.md), [README.md](../README.md),
+  and `src/invoice_agent_web/__init__.py`.
+- **Single launch surface.** Removed the ad-hoc `run.sh` Docker wrapper
+  \u2014 there is now exactly one entrypoint, the Typer CLI
+  (`infotech-email-agent` with subcommands `up`/`start`/`stop`/`restart`/
+  `status`/`dev`/`doctor`/`version`). For containers, `docker compose up`
+  is the documented one-liner.
+
+### Added
+- **Background lifecycle management for the dashboard.**
+  `infotech-email-agent` gains four new subcommands —
+  `start`, `stop`, `restart`, `status` — that spawn the FastAPI +
+  bundled UI server in a detached process (`start_new_session=True`),
+  persist the PID at `out/web/server.pid`, and stream stdout+stderr to
+  `out/web/server.log`. `start` refuses to launch when a live PID
+  file already exists; `stop` SIGTERMs (10 s grace) then escalates to
+  SIGKILL; `restart` is a best-effort `stop` followed by `start`;
+  `status` exits 0 when running, 3 when not. `up` (foreground) and
+  `dev` are unchanged. Documented in `docs/RUNBOOK.md`. New tests in
+  `tests/test_web_cli.py` (32 total, all passing) sandbox the PID/log
+  files via `tmp_path` and stub spawn/terminate so no real process
+  binds a port.
+
 - **Web dashboard (new feature axis).** A React + Vite + TypeScript
   frontend under `frontend/` and a thin FastAPI adapter at
   `src/invoice_agent_web/main.py`, launched by a Typer CLI

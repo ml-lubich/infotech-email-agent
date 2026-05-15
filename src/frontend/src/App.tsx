@@ -1,12 +1,15 @@
 import { useEffect, useState } from "react";
-import { getHealth, listExamples, runExample, runUpload } from "./api";
+import { getHealth, getRun, listExamples, runExample, runUpload } from "./api";
 import { ConfidenceGauge } from "./components/ConfidenceGauge";
+import { HistoryPanel } from "./components/HistoryPanel";
 import { InvoiceCard } from "./components/InvoiceCard";
 import { OutboundPanel } from "./components/OutboundPanel";
 import { PipelineTimeline } from "./components/PipelineTimeline";
 import { RiskFlags } from "./components/RiskFlags";
+import { SourcePanel } from "./components/SourcePanel";
 import { ThemeToggle } from "./components/ThemeToggle";
 import { UploadZone } from "./components/UploadZone";
+import { UsagePanel } from "./components/UsagePanel";
 import type { ExampleCase, HealthResponse, IntakeResponse } from "./types";
 
 export default function App() {
@@ -17,6 +20,8 @@ export default function App() {
     const [busy, setBusy] = useState(false);
     const [error, setError] = useState<string | null>(null);
     const [result, setResult] = useState<IntakeResponse | null>(null);
+    // Bumped after every successful run so the HistoryPanel re-fetches.
+    const [historyKey, setHistoryKey] = useState(0);
 
     useEffect(() => {
         getHealth()
@@ -39,6 +44,7 @@ export default function App() {
         try {
             const r = await runUpload(email, pdf, email.name.replace(/\.json$/i, ""));
             setResult(r);
+            setHistoryKey((k) => k + 1);
         } catch (e) {
             setError((e as Error).message);
         } finally {
@@ -52,6 +58,20 @@ export default function App() {
         try {
             const r = await runExample(name);
             setResult(r);
+            setHistoryKey((k) => k + 1);
+        } catch (e) {
+            setError((e as Error).message);
+        } finally {
+            setBusy(false);
+        }
+    }
+
+    async function loadHistory(caseId: string) {
+        setBusy(true);
+        setError(null);
+        try {
+            const r = await getRun(caseId);
+            setResult(r);
         } catch (e) {
             setError((e as Error).message);
         } finally {
@@ -60,6 +80,7 @@ export default function App() {
     }
 
     const envelope = result?.outbound_json.pipeline;
+    const usage = result?.outbound_json.usage;
     const flags = (result?.outbound_json.risk_flags ?? []) as string[];
     const warnings = (result?.outbound_json.source_warnings ?? []) as string[];
 
@@ -136,6 +157,12 @@ export default function App() {
                             ))}
                         </div>
                     </div>
+
+                    <HistoryPanel
+                        refreshKey={historyKey}
+                        onPick={loadHistory}
+                        busy={busy}
+                    />
                 </aside>
 
                 <main>
@@ -156,8 +183,10 @@ export default function App() {
                             </div>
                             <ConfidenceGauge envelope={envelope} />
                             <RiskFlags flags={flags} warnings={warnings} />
+                            <UsagePanel usage={usage} />
                             <PipelineTimeline shots={envelope?.shots ?? []} />
                             <InvoiceCard invoice={result.outbound_json} />
+                            <SourcePanel result={result} />
                             <OutboundPanel result={result} />
                         </>
                     )}

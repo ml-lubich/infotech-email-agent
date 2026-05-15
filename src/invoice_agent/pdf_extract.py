@@ -60,7 +60,12 @@ def _open_pdf(pdf_path: Path) -> "fitz.Document":
 def _safe_native_text(page: "fitz.Page") -> str:
     try:
         return page.get_text("text") or ""
-    except Exception:
+    except Exception as exc:  # noqa: BLE001 — logged, not silent
+        log.warning(
+            "pdf_extract: native text extraction failed on page %d: %s",
+            getattr(page, "number", -1),
+            exc,
+        )
         return ""
 
 
@@ -85,21 +90,29 @@ def _extract_page_text(page: "fitz.Page", page_index: int) -> tuple[str, bool]:
 def _safe_image_list(page: "fitz.Page") -> list[object]:
     try:
         return list(page.get_images(full=True))
-    except Exception:
+    except Exception as exc:  # noqa: BLE001 — logged, not silent
+        log.warning(
+            "pdf_extract: image list failed on page %d: %s",
+            getattr(page, "number", -1),
+            exc,
+        )
         return []
 
 
 def _decode_image(doc: "fitz.Document", xref: int) -> "Image.Image | None":
     try:
         base = doc.extract_image(xref)
-    except Exception:
+    except Exception as exc:  # noqa: BLE001 — logged, not silent
+        log.warning("pdf_extract: extract_image failed for xref=%d: %s", xref, exc)
         return None
     raw = base.get("image")
     if not raw:
+        log.info("pdf_extract: xref=%d has no image bytes; skipping", xref)
         return None
     try:
         return Image.open(io.BytesIO(raw))
-    except Exception:
+    except Exception as exc:  # noqa: BLE001 — logged, not silent
+        log.warning("pdf_extract: PIL decode failed for xref=%d: %s", xref, exc)
         return None
 
 

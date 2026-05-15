@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import os
 import sys
@@ -11,22 +12,17 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 from invoice_agent.agent import run_intake
+from invoice_agent.logging_setup import configure as configure_logging
+from invoice_agent.logging_setup import mirror_run_log
 
 
 def _configure_logging(log_path: Path) -> None:
-    log_path.parent.mkdir(parents=True, exist_ok=True)
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-        handlers=[
-            logging.StreamHandler(sys.stderr),
-            logging.FileHandler(log_path, encoding="utf-8"),
-        ],
-        force=True,
-    )
-    # Quiet third-party noise; keep our own decision trail loud.
-    logging.getLogger("httpx").setLevel(logging.WARNING)
-    logging.getLogger("openai").setLevel(logging.WARNING)
+    """Install centralized + per-run logging sinks.
+
+    Delegates to :mod:`invoice_agent.logging_setup` so the CLI and the
+    web adapter share one definition of "where logs go".
+    """
+    configure_logging(surface="cli", extra_file=log_path)
 
 
 def _parse_args(argv: list[str] | None) -> argparse.Namespace:
@@ -126,6 +122,58 @@ def _print_result(reply: str, artifacts: dict[str, Path]) -> None:
         print(f"  {name}: {path}{marker}")
 
 
+def _print_token_summary(out_dir: Path) -> None:
+    """Pretty-print per-phase token usage for business stakeholders.
+
+    Reads the ``usage`` envelope embedded in ``outbound_email.json`` by
+    ``_finalise_outbound``. Silent no-op when the envelope is missing
+    (e.g. a partial run that never reached the finalise shot) \u2014 the
+    structured ``usage`` log lines remain in ``run.log``.
+    """
+    json_path = out_dir / "outbound_email.json"
+    if not json_path.is_file():
+        return
+    try:
+        payload = json.loads(json_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return
+    usage = payload.get("usage") if isinstance(payload, dict) else None
+    if not isinstance(usage, dict):
+        return
+    totals = usage.get("totals") or {}
+    shots = usage.get("shots") or []
+    if not isinstance(totals, dict) or not isinstance(shots, list):
+        return
+
+    print()
+    print("Token usage")
+    print("-----------")
+    header = f"  {'phase':<22}{'model':<14}{'in':>10}{'cached':>10}{'out':>10}{'total':>10}"
+    print(header)
+    print("  " + "-" * (len(header) - 2))
+    for s in shots:
+        if not isinstance(s, dict):
+            continue
+        print(
+            f"  {str(s.get('shot', ''))[:22]:<22}"
+            f"{str(s.get('model', ''))[:14]:<14}"
+            f"{int(s.get('input_tokens', 0) or 0):>10,}"
+            f"{int(s.get('cached_input_tokens', 0) or 0):>10,}"
+            f"{int(s.get('output_tokens', 0) or 0):>10,}"
+            f"{int(s.get('total_tokens', 0) or 0):>10,}"
+        )
+    cache_ratio = float(usage.get("cache_hit_ratio", 0.0) or 0.0)
+    print("  " + "-" * (len(header) - 2))
+    print(
+        f"  {'TOTAL':<22}{'':<14}"
+        f"{int(totals.get('input_tokens', 0) or 0):>10,}"
+        f"{int(totals.get('cached_input_tokens', 0) or 0):>10,}"
+        f"{int(totals.get('output_tokens', 0) or 0):>10,}"
+        f"{int(totals.get('total_tokens', 0) or 0):>10,}"
+    )
+    print(f"  prompt-cache hit ratio: {cache_ratio * 100:.1f}%")
+
+
 def _run_intake_or_report(
     log: logging.Logger, args: argparse.Namespace, out_dir: Path
 ) -> tuple[int, object | None]:
@@ -180,6 +228,10 @@ def main(argv: list[str] | None = None) -> int:
 
     _log_artifacts(log, result.artifacts)
     _print_result(result.agent_reply, result.artifacts)
+    _print_token_summary(out_dir)
+    # Mirror per-run log into logs/runs/<case_id>.log so operators have
+    # a flat, greppable history without walking out/. Best-effort.
+    mirror_run_log(log_file, out_dir.name)
     return 0
 
 

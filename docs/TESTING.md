@@ -27,25 +27,83 @@ Coverage is **gated at 80% line + branch** (configured in
 through the Agents SDK's tool dispatcher; their work is covered via the
 `_impl` symbols).
 
-Current suite size: 230 collected tests across 20 test modules.
+Current suite size: 458 collected tests across 32 test modules.
 
 The web adapter (`src/invoice_agent_web/`) is an HTTP-and-CLI adapter
 layer (per `docs/ARCHITECTURE.md`); its Typer CLI is exercised by
 `tests/test_web_cli.py`, which:
 
 - pins the documented `--help` surface for the root and every
-  subcommand (`up`, `dev`, `doctor`, `version`) so docs and the binary
-  cannot silently drift;
+  subcommand (`up`, `start`, `stop`, `restart`, `status`, `dev`,
+  `doctor`, `version`) so docs and the binary cannot silently drift;
 - asserts environment-var error paths (`OPENAI_API_KEY` missing → exit
-  code `2` from `up`; warning printed by `dev`);
+  code `2` from `up` and `start`; warning printed by `dev`);
 - asserts `up` invokes uvicorn with the requested host/port and that
   `--rebuild` forces a fresh frontend build;
 - asserts the no-subcommand call delegates to `up` (default action);
 - covers the `_bundle_built` / `_build_frontend` helpers, including
-  the "Bun missing" early-exit.
+  the "Bun missing" early-exit;
+- exercises the background lifecycle: `start` writes the PID file and
+  refuses to launch when one already exists; `stop` is a no-op when
+  no PID file is present and SIGTERMs + removes the file when one is;
+  `restart` stops then starts; `status` exits `3` when not running and
+  `0` when running; `_read_pidfile` clears stale entries and ignores
+  garbage. The PID/log files are sandboxed via `tmp_path` and the
+  spawn/terminate helpers are stubbed so no real process is forked.
 
 Heavy side effects (uvicorn, browser, `bun run build`, sleeps) are
 patched out — the suite never binds a port.
+
+The `infotech-email-agent run` subcommand (free-form file/folder intake
+dispatcher) is covered by
+[`tests/test_web_cli_run.py`](../tests/test_web_cli_run.py), which:
+
+- unit-tests `discover_cases()` for every classification path
+  (single case folder, folder of case subdirs, explicit `Email.json`,
+  lone `.pdf` paired by sibling, mixed order, dedup) and rejects
+  unknown extensions / missing paths via `typer.BadParameter`;
+- replaces `invoice_agent.cli.main` with a recording stub so the
+  CLI integration tests assert dispatch arguments (per-case
+  `--email`, `--pdf`, `--out-dir`) without ever calling OpenAI;
+- pins the `--no-llm` env-toggle, the `--continue-on-error` /
+  `--stop-on-error` switch, the empty-input exit code (`2`), and the
+  `--help` text (so the documented examples cannot drift).
+
+The persisted-runs HTTP API (`GET /api/runs`, `GET /api/runs/{case_id}`,
+`GET /api/runs/{case_id}/download`) is covered by
+[`tests/test_web_runs_endpoints.py`](../tests/test_web_runs_endpoints.py).
+It seeds a synthetic case folder under a `tmp_path`-backed runs dir
+(via the `INVOICE_WEB_RUNS_DIR` override), drives a `TestClient`, and
+asserts: list ordering (newest first), re-hydration field shape, zip
+download contents (validated by reading the bytes back through
+`zipfile.ZipFile`), and 400/404 path-traversal defences for malformed
+case ids.
+
+The **negative-input + crash-resilience surface** of the web adapter
+is covered by
+[`tests/test_web_intake_negative.py`](../tests/test_web_intake_negative.py).
+It exercises `/api/intake` upload validation (non-`.json` filename,
+malformed JSON, non-UTF-8 bytes, non-`.pdf` filename, missing
+`OPENAI_API_KEY` → 503), pipeline-crash translation
+(`FileNotFoundError` → 400, `ValueError` → 422, `RuntimeError` →
+structured 500 envelope with no stack trace), an explicit
+server-stays-alive regression (a crashing request must not poison
+the next request), `/api/intake/example` traversal-name rejection
+plus a happy path with a stubbed `run_intake`,
+`/api/runs/{case_id}/download` for unknown ids and invalid ids,
+malformed `outbound_email.json` rendering as a JSON 500 envelope
+instead of crashing the worker, and `/api/health` + `/api/examples`
+response-shape smoke. The OpenAI client is never constructed:
+`INVOICE_PIPELINE_LLM_DISABLED=1` is set per-test and `run_intake` is
+monkeypatched.
+
+The `infotech-email-agent docker {up,down,restart,status,logs}`
+subgroup is covered by
+[`tests/test_docker_cli.py`](../tests/test_docker_cli.py). `shutil.which`
+and `subprocess.call` are patched so no real `docker compose` runs;
+the tests assert command-line construction (`-d`, `--build`, `logs -f`),
+that `docker up --port N` injects `HOST_PORT=N` into the child env, and
+that the missing-`docker` path exits 2.
 
 Coverage map:
 
@@ -126,6 +184,20 @@ Coverage map:
   opt-out; soft fallback when the client constructor fails; shots fire
   as `PASS`/`FLAG` when a client is provided and as `SKIPPED` when not;
   verifier exceptions surface as `FAIL` (no silent fallback).
+- `tests/test_llm_noise_filter.py` — pins the citable-evidence gate
+  applied to LLM shots so the weak verifier model (`gpt-5-nano`)
+  cannot anchor a clean run at `0.65` with unanchored "soft"
+  findings. Coverage: LLM PASS reward parity (+0.10) and a six-shot
+  clean run reaching `1.00`; critic_review drops `low_confidence_*`
+  grades while keeping `verifier_disagreement_*`; injection_screen
+  drops the canonical aggregate
+  `prompt_injection_attempt_in_document` when the deterministic
+  scanner does NOT agree, and keeps it (with a cite back to the
+  agreeing regex) when it does; specific known tags
+  (`ignore_prior_instructions`) are kept with their regex quote;
+  hallucinated unknown tags are dropped; garbage tag strings (empty,
+  unicode, 500-char) do not crash the gate; an LLM seam exception
+  still records `FAIL` and the pipeline finalises.
 - `tests/test_verifier.py` — `VerificationReport`, `FieldScore`,
   `Disagreement` model shapes; `verify_extraction` and
   `injection_screen` against an injected fake OpenAI client (happy

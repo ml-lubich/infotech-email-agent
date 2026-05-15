@@ -4,6 +4,27 @@ interface Props {
     shots: PipelineShot[];
 }
 
+// Plain-English description of every shot the pipeline can run.
+// Keep this in sync with docs/ARCHITECTURE.md "Pipeline shots" section.
+const SHOT_EXPLAIN: Record<string, string> = {
+    pre_flight:
+        "Deterministic email scan: regex prompt-injection sweep + attachment sanity check. No LLM call.",
+    extract:
+        "LLM (gpt-5-mini, vision): reads the PDF + embedded images and emits structured invoice JSON. The single most expensive shot.",
+    arithmetic_check:
+        "Deterministic math: line totals, subtotal, tax, total_due, and currency rounding. No LLM call.",
+    critic_review:
+        "LLM (gpt-5-nano): independent verifier compares the extracted JSON against the raw PDF text and flags disagreements / low-confidence fields.",
+    injection_screen:
+        "LLM (gpt-5-nano): dedicated security scan for prompt-injection or instruction-redirect attempts in the email body + PDF text.",
+    synthesis_finalise:
+        "Deterministic finalisation: prepends the confidence banner to outbound_email.txt and embeds the pipeline envelope into outbound_email.json.",
+};
+
+function explainShot(name: string): string {
+    return SHOT_EXPLAIN[name] ?? "Custom pipeline shot.";
+}
+
 function rowClass(decision: string): string {
     switch (decision) {
         case "PASS":
@@ -46,6 +67,17 @@ export function PipelineTimeline({ shots }: Props) {
                             <div className="meta">
                                 {shot.kind}
                                 {shot.model ? ` · ${shot.model}` : ""} · {shot.decision}
+                            </div>
+                            <div
+                                className="explain"
+                                style={{
+                                    color: "var(--text-2)",
+                                    fontSize: 12,
+                                    marginTop: 4,
+                                    lineHeight: 1.4,
+                                }}
+                            >
+                                {explainShot(shot.name)}
                             </div>
                             {shot.findings.length > 0 && (
                                 <div className="findings">

@@ -2,10 +2,13 @@
 
 Endpoints
 ---------
-GET  /api/health        liveness probe + LLM activation status.
-POST /api/intake        multipart upload (email + optional pdf) -> intake result.
-GET  /api/examples      list shipped example cases (folders under examples/).
-POST /api/intake/example run a shipped example case by name.
+GET  /api/health                       liveness probe + LLM activation status.
+POST /api/intake                       multipart upload (email + optional pdf) -> intake result.
+GET  /api/examples                     list shipped example cases (folders under examples/).
+POST /api/intake/example               run a shipped example case by name.
+GET  /api/runs                         list persisted runs in the runs dir (newest first).
+GET  /api/runs/{case_id}               re-hydrate a previously stored run as IntakeResponse.
+GET  /api/runs/{case_id}/download      stream a .zip of the case folder (all artefacts).
 
 Design notes
 ------------
@@ -27,18 +30,22 @@ import re
 import shutil
 import time
 import uuid
+import zipfile
 from dataclasses import dataclass
+from io import BytesIO
 from pathlib import Path
 from typing import Any
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from invoice_agent.agent import IntakeResult, run_intake
+from invoice_agent.logging_setup import configure as configure_logging
+from invoice_agent.logging_setup import mirror_run_log
 
 log = logging.getLogger("invoice_agent_web")
 
@@ -48,7 +55,10 @@ log = logging.getLogger("invoice_agent_web")
 
 REPO_ROOT: Path = Path(__file__).resolve().parents[2]
 EXAMPLES_DIR: Path = REPO_ROOT / "examples"
-FRONTEND_DIST: Path = REPO_ROOT / "frontend" / "dist"
+# Frontend lives under src/frontend/ — it's a sibling of the Python
+# packages, not a top-level folder. Keeps everything project-related
+# under src/ so live editing is one tree.
+FRONTEND_DIST: Path = REPO_ROOT / "src" / "frontend" / "dist"
 DEFAULT_RUNS_DIR: Path = REPO_ROOT / "out" / "web"
 RUNS_DIR_ENV: str = "INVOICE_WEB_RUNS_DIR"
 
@@ -56,8 +66,17 @@ _SLUG_RE = re.compile(r"[^a-zA-Z0-9_.-]+")
 
 
 def _runs_dir() -> Path:
+    # Precedence: legacy env var (back-compat) → merged Settings (TOML/INFOTECH_*)
+    # → hardcoded default. Env-first preserves the documented behaviour while
+    # adding TOML as the next layer down.
     override = os.getenv(RUNS_DIR_ENV)
-    base = Path(override) if override else DEFAULT_RUNS_DIR
+    if override:
+        base = Path(override)
+    else:
+        from invoice_agent.config import load_settings
+
+        cfg_dir = load_settings().web_runs_dir
+        base = Path(cfg_dir) if cfg_dir else DEFAULT_RUNS_DIR
     base.mkdir(parents=True, exist_ok=True)
     return base
 
@@ -72,6 +91,63 @@ def _new_case_dir(label: str) -> Path:
     case = _runs_dir() / f"{stamp}_{_slug(label)}_{uuid.uuid4().hex[:6]}"
     case.mkdir(parents=True, exist_ok=False)
     return case
+
+
+# Stored runs live as direct children of ``_runs_dir()``. We do NOT
+# walk up the parent chain when resolving by ``case_id`` so the URL
+# cannot escape the runs root.
+
+_CASE_ID_RE = re.compile(r"^[A-Za-z0-9_.-]+$")
+
+
+def _resolve_case_dir(case_id: str) -> Path:
+    """Return the case dir for ``case_id`` or raise 400/404.
+
+    Validates the id against a strict allow-list and ensures the resolved
+    path stays inside the runs directory (path-traversal defence).
+    """
+    if not case_id or not _CASE_ID_RE.fullmatch(case_id):
+        raise HTTPException(status_code=400, detail="invalid case_id")
+    base = _runs_dir().resolve()
+    candidate = (base / case_id).resolve()
+    if base not in candidate.parents:
+        raise HTTPException(status_code=400, detail="invalid case_id")
+    if not candidate.is_dir():
+        raise HTTPException(status_code=404, detail=f"run not found: {case_id}")
+    return candidate
+
+
+def _collect_runs() -> list["StoredRun"]:
+    """List all persisted runs in the runs dir, newest first."""
+    base = _runs_dir()
+    if not base.is_dir():
+        return []
+    out: list[StoredRun] = []
+    for child in base.iterdir():
+        if not child.is_dir():
+            continue
+        try:
+            stat = child.stat()
+        except OSError:
+            continue
+        files = [p for p in child.rglob("*") if p.is_file()]
+        size = sum(p.stat().st_size for p in files)
+        # Best-effort label = the slug between the timestamp and the uuid
+        # suffix (see ``_new_case_dir``); fall back to the raw name.
+        parts = child.name.split("_")
+        label = "_".join(parts[2:-1]) if len(parts) >= 4 else child.name
+        out.append(
+            StoredRun(
+                case_id=child.name,
+                label=label or child.name,
+                created_at=stat.st_mtime,
+                has_outbound=(child / "outbound_email.json").is_file(),
+                file_count=len(files),
+                size_bytes=size,
+            )
+        )
+    out.sort(key=lambda r: r.created_at, reverse=True)
+    return out
 
 
 # --------------------------------------------------------------------------- #
@@ -103,6 +179,25 @@ class IntakeResponse(BaseModel):
     outbound_json: dict[str, Any]
     artifacts: dict[str, str]
     log_tail: str
+    # Names of the original input files inside the case dir, so the UI
+    # can fetch them via /api/runs/{case_id}/file/{filename} and render
+    # the source email + PDF alongside the extraction output. Either may
+    # be ``None`` (no PDF attached, or hand-built minimal case).
+    email_filename: str | None = None
+    pdf_filename: str | None = None
+
+
+class StoredRun(BaseModel):
+    case_id: str
+    label: str
+    created_at: float = Field(..., description="POSIX mtime of the case dir.")
+    has_outbound: bool
+    file_count: int
+    size_bytes: int
+
+
+class RunsResponse(BaseModel):
+    runs: list[StoredRun]
 
 
 # --------------------------------------------------------------------------- #
@@ -202,6 +297,43 @@ def _read_outbound(case_dir: Path) -> tuple[str, dict[str, Any]]:
     return text, payload
 
 
+# Files that the case dir produces but that are NOT the original
+# inputs — used by ``_source_filenames`` to find the inbound email +
+# invoice PDF without misclassifying agent-written artefacts.
+_OUTPUT_NAMES: frozenset[str] = frozenset(
+    {
+        "outbound_email.json",
+        "outbound_email.txt",
+        "run.log",
+        "agent_reply.txt",
+        "extracted_invoice.json",
+    }
+)
+
+
+def _source_filenames(case_dir: Path) -> tuple[str | None, str | None]:
+    """Return ``(email_filename, pdf_filename)`` for the case dir.
+
+    The intake handlers always copy the inbound email to ``Email.json``
+    and store any attached PDF alongside it under its original name. We
+    surface those names so the dashboard can deep-link to the source
+    artefacts via ``/api/runs/{case_id}/file/{filename}``.
+    """
+    email_name: str | None = None
+    pdf_name: str | None = None
+    for entry in sorted(case_dir.iterdir()):
+        if not entry.is_file():
+            continue
+        if entry.name in _OUTPUT_NAMES:
+            continue
+        suffix = entry.suffix.lower()
+        if suffix == ".json" and email_name is None:
+            email_name = entry.name
+        elif suffix == ".pdf" and pdf_name is None:
+            pdf_name = entry.name
+    return email_name, pdf_name
+
+
 def _execute_pipeline(inputs: _RunInputs) -> IntakeResponse:
     if not os.getenv("OPENAI_API_KEY"):
         raise HTTPException(
@@ -229,8 +361,12 @@ def _execute_pipeline(inputs: _RunInputs) -> IntakeResponse:
     finally:
         logging.getLogger().removeHandler(log_handler)
         log_handler.close()
+        # Mirror this run's log into logs/runs/<case_id>.log so ops
+        # can grep historical runs from one flat directory.
+        mirror_run_log(inputs.case_dir / "run.log", inputs.case_dir.name)
 
     outbound_text, outbound_json = _read_outbound(inputs.case_dir)
+    email_name, pdf_name = _source_filenames(inputs.case_dir)
     return IntakeResponse(
         case_id=inputs.case_dir.name,
         agent_reply=result.agent_reply,
@@ -238,6 +374,8 @@ def _execute_pipeline(inputs: _RunInputs) -> IntakeResponse:
         outbound_json=outbound_json,
         artifacts={name: str(path) for name, path in result.artifacts.items()},
         log_tail=_read_log_tail(inputs.case_dir),
+        email_filename=email_name,
+        pdf_filename=pdf_name,
     )
 
 
@@ -248,12 +386,10 @@ def _execute_pipeline(inputs: _RunInputs) -> IntakeResponse:
 
 def create_app() -> FastAPI:
     load_dotenv()
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-    )
-    logging.getLogger("httpx").setLevel(logging.WARNING)
-    logging.getLogger("openai").setLevel(logging.WARNING)
+    # Centralized logging: stderr + logs/web/web.log (rotated daily, 14d).
+    # Existing per-request out/<case>/run.log handlers attach via
+    # _attach_run_log_handler so the dashboard's log_tail still works.
+    configure_logging(surface="web")
 
     app = FastAPI(
         title="Invoice Intake Dashboard API",
@@ -366,6 +502,96 @@ def create_app() -> FastAPI:
                 pdf_path=None,
                 case_dir=case_dir,
             )
+        )
+
+    # ------------------------------------------------------------------ #
+    # persisted runs — list, re-hydrate, and download as a single zip
+    # ------------------------------------------------------------------ #
+
+    @app.get("/api/runs", response_model=RunsResponse)
+    def list_runs() -> RunsResponse:
+        return RunsResponse(runs=_collect_runs())
+
+    @app.get("/api/runs/{case_id}", response_model=IntakeResponse)
+    def get_run(case_id: str) -> IntakeResponse:
+        case_dir = _resolve_case_dir(case_id)
+        outbound_text, outbound_json = _read_outbound(case_dir)
+        # Re-hydrate the artefact map from the case dir contents so the UI
+        # has the same shape it gets from a fresh run.
+        artifacts = {
+            p.name: str(p) for p in case_dir.iterdir() if p.is_file()
+        }
+        email_name, pdf_name = _source_filenames(case_dir)
+        return IntakeResponse(
+            case_id=case_dir.name,
+            agent_reply="(loaded from history)",
+            outbound_text=outbound_text,
+            outbound_json=outbound_json,
+            artifacts=artifacts,
+            log_tail=_read_log_tail(case_dir),
+            email_filename=email_name,
+            pdf_filename=pdf_name,
+        )
+
+    @app.get("/api/runs/{case_id}/file/{filename}")
+    def get_run_file(case_id: str, filename: str) -> FileResponse:
+        """Stream one file from a case dir for inline rendering.
+
+        Used by the dashboard's "source" panel to display the original
+        ``Email.json`` and the invoice PDF that the agent worked from.
+
+        Defence:
+        * ``case_id`` is validated by ``_resolve_case_dir``.
+        * ``filename`` must be a simple basename (no slashes, no ``..``);
+          the resolved path must stay inside the case dir.
+        * Only ``.json`` and ``.pdf`` are served. Run logs and outbound
+          artefacts already have their own fields on ``IntakeResponse``;
+          opening this surface to ``run.log`` etc. would let a noisy
+          handler exfiltrate secrets that landed in a stack trace.
+        """
+        case_dir = _resolve_case_dir(case_id)
+        if not filename or "/" in filename or "\\" in filename or ".." in filename:
+            raise HTTPException(status_code=400, detail="invalid filename")
+        candidate = (case_dir / filename).resolve()
+        if case_dir.resolve() not in candidate.parents:
+            raise HTTPException(status_code=400, detail="invalid filename")
+        if not candidate.is_file():
+            raise HTTPException(status_code=404, detail=f"file not found: {filename}")
+        suffix = candidate.suffix.lower()
+        if suffix == ".pdf":
+            media = "application/pdf"
+        elif suffix == ".json":
+            media = "application/json"
+        else:
+            raise HTTPException(
+                status_code=415,
+                detail="only .json and .pdf source files can be fetched",
+            )
+        return FileResponse(
+            candidate,
+            media_type=media,
+            # ``inline`` so browsers render the PDF in <iframe> / <embed>
+            # instead of forcing a download.
+            headers={"Content-Disposition": f'inline; filename="{candidate.name}"'},
+        )
+
+    @app.get("/api/runs/{case_id}/download")
+    def download_run(case_id: str) -> StreamingResponse:
+        case_dir = _resolve_case_dir(case_id)
+        buf = BytesIO()
+        with zipfile.ZipFile(buf, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
+            for path in sorted(case_dir.rglob("*")):
+                if path.is_file():
+                    zf.write(path, arcname=path.relative_to(case_dir))
+        buf.seek(0)
+        return StreamingResponse(
+            buf,
+            media_type="application/zip",
+            headers={
+                "Content-Disposition": (
+                    f'attachment; filename="{case_dir.name}.zip"'
+                )
+            },
         )
 
     @app.exception_handler(HTTPException)

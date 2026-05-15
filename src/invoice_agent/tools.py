@@ -19,6 +19,7 @@ from invoice_agent._llm_params import llm_params
 from invoice_agent.models import DEFAULT_EXTRACT_MODEL, resolve_model
 from invoice_agent.pdf_extract import extract_pdf_content
 from invoice_agent.schema import InvoicePayload
+from invoice_agent.usage import extract_usage, write_extract_usage
 
 log = logging.getLogger(__name__)
 
@@ -179,7 +180,7 @@ def _call_extract_model(
     user_content: list[dict[str, object]], params: dict[str, object]
 ) -> object:
     client = OpenAI()
-    return client.responses.parse(
+    response = client.responses.parse(
         model=_EXTRACT_MODEL,
         input=[
             {"role": "system", "content": _SYSTEM},
@@ -188,6 +189,24 @@ def _call_extract_model(
         text_format=InvoicePayload,
         **params,
     )
+    _publish_extract_usage(response)
+    return response
+
+
+def _publish_extract_usage(response: object) -> None:
+    """Best-effort: publish this shot's usage to the per-run side-channel.
+
+    The orchestrator (`_IntakeRun`) reads it back via ``read_extract_usage``
+    so usage roll-ups stay accurate without threading the response object
+    through the Agents SDK tool boundary.
+    """
+    out_dir_str = os.getenv(OUT_DIR_ENV)
+    if not out_dir_str:
+        return
+    usage = extract_usage(response)
+    if not usage:
+        return
+    write_extract_usage(Path(out_dir_str), _EXTRACT_MODEL, usage)
 
 
 def _handle_missing_payload(response: object) -> str:

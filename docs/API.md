@@ -5,6 +5,7 @@ The public surface is the CLI plus a small Python API.
 ## Table of contents
 
 - [CLI](#cli)
+  - [`infotech-email-agent run`](#infotech-email-agent-run--minimal-intelligent-cli)
 - [Environment variables](#environment-variables)
 - [Python API](#python-api)
 - [Outputs](#outputs)
@@ -34,17 +35,116 @@ Exit codes:
 | 1 | Run failure (PDF missing, no attachment, unexpected exception). |
 | 2 | Bad CLI input (missing `OPENAI_API_KEY` or missing email file). |
 
+### `infotech-email-agent run` — minimal "intelligent" CLI
+
+Same intake pipeline, but accepts a free-form list of paths in any
+order: files (`.json`, `.pdf`), a single case folder, or a folder of
+case subdirectories. Each input is auto-classified; one or many cases
+are dispatched through the same `invoice_agent.cli.main` entry point.
+
+```
+infotech-email-agent run [PATHS]... [-f/--file PATH]... \
+                         [--out-dir <dir>] [--no-llm] \
+                         [--continue-on-error|--stop-on-error]
+```
+
+Examples:
+
+```
+# one case folder (Email.json + Invoice.pdf auto-paired)
+infotech-email-agent run examples/case_1
+
+# a folder of cases — runs every subdir that contains Email.json
+infotech-email-agent run examples
+
+# explicit files in any order
+infotech-email-agent run examples/case_1/Invoice.pdf examples/case_1/Email.json
+
+# repeated -f works just like positional paths
+infotech-email-agent run -f examples/case_1 -f examples/case_4_eur_consulting
+
+# fast smoke pass with the LLM shots disabled (deterministic only)
+infotech-email-agent run examples --no-llm
+```
+
+Flags:
+
+| Flag | Default | Meaning |
+|---|---|---|
+| `PATHS...` | — | Files (`.json`, `.pdf`) and/or folders. Order does not matter. |
+| `-f`, `--file` | — | Same as a positional path; repeatable. |
+| `--out-dir` | `./out/` | Root for artifacts. Each case writes to `<out-dir>/<case-folder-name>/`. |
+| `--no-llm` | off | Sets `INFOTECH_PIPELINE_LLM_DISABLED=1` — pipeline LLM shots SKIPPED. |
+| `--continue-on-error` / `--stop-on-error` | continue | Behaviour when running many cases. |
+
+Exit codes:
+
+| Code | Meaning |
+|---|---|
+| 0 | All discovered cases succeeded. |
+| 1 | One or more cases failed (full per-case summary printed at the end). |
+| 2 | Bad CLI input (no inputs, no `Email.json` discovered, unknown extension). |
+
 ## Environment variables
 
-| Name | Required | Default | Meaning |
+The canonical prefix is `INFOTECH_*`. Legacy `INVOICE_*` names are still
+honored as aliases for back-compat — when both are set, `INFOTECH_*` wins.
+
+| Name (canonical / legacy) | Required | Default | Meaning |
 |---|---|---|---|
-| `OPENAI_API_KEY` | yes | — | OpenAI credential. |
-| `INVOICE_AGENT_MODEL` | no | `gpt-5-mini` | Synthesis agent model (must be allow-listed). |
-| `INVOICE_EXTRACT_MODEL` | no | `gpt-5-mini` | Vision/extraction model (must be allow-listed). |
-| `INVOICE_CRITIC_MODEL` | no | `gpt-5-nano` | Verifier model used by the `critic_review` and `injection_screen` shots (must be allow-listed). |
-| `INVOICE_PIPELINE_LLM_DISABLED` | no | unset | When set to `1`, the CLI skips constructing an OpenAI client; the LLM pipeline shots (`critic_review`, `injection_screen`) become `SKIPPED`. Used by the test suite to keep runs offline. |
+| `OPENAI_API_KEY` | yes | — | OpenAI credential. Loaded from `.env`. Never put this in TOML. |
+| `INFOTECH_AGENT_MODEL` / `INVOICE_AGENT_MODEL` | no | `gpt-5-mini` | Synthesis agent model (must be allow-listed). |
+| `INFOTECH_EXTRACT_MODEL` / `INVOICE_EXTRACT_MODEL` | no | `gpt-5-mini` | Vision/extraction model (must be allow-listed). |
+| `INFOTECH_CRITIC_MODEL` / `INVOICE_CRITIC_MODEL` | no | `gpt-5-nano` | Verifier model used by the `critic_review` and `injection_screen` shots (must be allow-listed). |
+| `INFOTECH_PIPELINE_LLM_DISABLED` / `INVOICE_PIPELINE_LLM_DISABLED` | no | unset | When `1`, the CLI skips constructing an OpenAI client; pipeline LLM shots become `SKIPPED`. Used by the test suite to keep runs offline. |
+| `INFOTECH_LOG_DIR` / `INVOICE_LOG_DIR` | no | `<repo>/logs` | Override the centralized log root (`logs/{cli,web,runs}/`). |
+| `INFOTECH_WEB_HOST` / `INVOICE_WEB_HOST` | no | `127.0.0.1` | Bind host for the dashboard. |
+| `INFOTECH_WEB_PORT` / `INVOICE_WEB_PORT` | no | `8000` | Port for the dashboard. |
+| `INFOTECH_WEB_RUNS_DIR` / `INVOICE_WEB_RUNS_DIR` | no | `./out/web` | Per-request case dir root used by the FastAPI adapter. |
 | `INVOICE_OUT_DIR` | set by CLI | — | Where the notify tool writes artifacts. Do not set manually. |
-| `INVOICE_INJECTION_SIGNALS` | set by `run_intake` | — | Per-run side channel from the input guardrail to the notify tool. Comma-separated tag list; do not set manually. |
+| `INVOICE_INJECTION_SIGNALS` | set by `run_intake` | — | Per-run side channel from the input guardrail to the notify tool. Do not set manually. |
+
+## Configuration cascade (TOML)
+
+Highest layer wins. See [`src/invoice_agent/config.py`](../src/invoice_agent/config.py).
+
+1. **Defaults** (the `Settings` Pydantic model).
+2. **Global TOML** — OS-correct user config path:
+   - macOS: `~/Library/Application Support/infotech-email-agent/config.toml`
+   - Linux: `${XDG_CONFIG_HOME:-~/.config}/infotech-email-agent/config.toml`
+   - Windows: `%APPDATA%\infotech-email-agent\config.toml`
+3. **Project TOML** — first match wins, walking up from CWD:
+   1. `./config/config.toml`                  ← recommended (visible in repo + Docker mount)
+   2. `./config/infotech-email-agent.toml`
+   3. `./infotech-email-agent.toml`           (flat keys at the root)
+   4. `./pyproject.toml` table `[tool.infotech-email-agent]`
+4. **Environment variables** (table above).
+5. **Command-line flags** — `infotech-email-agent --port 9000`, etc.
+
+Inspect the merged view from the CLI:
+
+```bash
+infotech-email-agent config show     # pretty: paths + every resolved key
+infotech-email-agent config path     # machine-friendly: global=… project=…
+```
+
+Example global config (auto-scaffolded by `./scripts/install.sh`):
+
+```toml
+# ~/Library/Application Support/infotech-email-agent/config.toml  (macOS)
+# ~/.config/infotech-email-agent/config.toml                       (Linux)
+
+# agent_model    = "gpt-5-mini"
+# extract_model  = "gpt-5-mini"
+# critic_model   = "gpt-5-nano"
+# web_host       = "127.0.0.1"
+# web_port       = 8000
+# web_runs_dir   = "/abs/path/to/per-request/case/dirs"
+# llm_disabled   = false
+```
+
+Bad values (unknown model id, non-integer port, malformed TOML) abort
+startup with a clear error — there are no silent fallbacks.
 
 ## Python API
 
@@ -92,6 +192,17 @@ Written to `--out-dir`:
   line per LLM shot, and a single `usage_total shots=… input=… output=… total=… cache_hit_ratio=…`
   summary line per run.
 
+In addition to per-run `out/<case>/run.log`, both surfaces also write
+to a centralized `logs/` tree (overridable via `INFOTECH_LOG_DIR`):
+
+- `logs/cli/cli.log` — daily-rotated (14 backups), every CLI run.
+- `logs/web/web.log` — daily-rotated (14 backups), every web request.
+- `logs/runs/<case_id>.log` — flat mirror of the per-run log, written
+  at the end of each successful run.
+
+After a successful CLI run, a stakeholder-friendly token table is also
+printed to stdout (per-phase + total tokens, prompt-cache hit ratio).
+
 ## Schema
 
 `InvoicePayload` (see `invoice_agent/schema.py`) is the single contract for
@@ -120,7 +231,7 @@ breaking the schema, but existing tag names are stable.
 
 ## HTTP API (web dashboard)
 
-The optional web dashboard (see `frontend/README.md` and
+The optional web dashboard (see `src/frontend/README.md` and
 `docs/RUNBOOK.md`) is served by a thin FastAPI adapter,
 `src/invoice_agent_web/main.py`, launched through the Typer CLI
 `src/invoice_agent_web/cli.py` (console script
@@ -137,6 +248,32 @@ at `/assets/*`, so the whole app runs on one port.
 | GET | `/api/examples` | `{cases: [{name, has_pdf, subject}, ...]}` listing `examples/case_*/`. |
 | POST | `/api/intake` | Multipart form: `email` (`.json`, required), `pdf` (`.pdf`, optional), `label` (string, optional). Runs the pipeline and returns an `IntakeResponse`. |
 | POST | `/api/intake/example` | Form: `name=<case folder name>`. Copies the example into a fresh case dir and runs the pipeline. |
+| GET | `/api/runs` | `{runs: [{case_id, label, created_at, has_outbound, file_count, size_bytes}, ...]}` listing every persisted case dir under `runs_dir`, newest first. |
+| GET | `/api/runs/{case_id}` | Re-hydrate a previously-stored run as an `IntakeResponse` (no pipeline call). 400 on a malformed id, 404 if the case dir is missing. |
+| GET | `/api/runs/{case_id}/file/{filename}` | Stream one source file from the case dir for inline rendering. Used by the dashboard's source panel to show the original `Email.json` and invoice PDF. Only `.json` and `.pdf` are served (run.log and outbound artefacts have their own fields on `IntakeResponse`). 400 on a malformed filename / path-traversal attempt, 404 if the file is missing, 415 if the extension is not allowed. Response carries `Content-Disposition: inline` so browsers render the PDF in `<iframe>` instead of forcing a download. |
+| GET | `/api/runs/{case_id}/download` | Streams a `application/zip` of the case folder (every file recursively). Filename: `<case_id>.zip`. |
+
+### Dashboard CLI subcommands
+
+The Typer CLI ships these subcommands (see `docs/RUNBOOK.md` for full
+flags). Background lifecycle is PID-file-based; the PID file lives at
+`out/web/server.pid` and the captured server log at `out/web/server.log`.
+
+| Subcommand | Purpose | Exit codes |
+|---|---|---|
+| `up` (default) | Foreground: build bundle (if needed), bind, open browser, block until Ctrl-C. | 0 on clean exit, 2 if `OPENAI_API_KEY` is missing. |
+| `start` | Spawn detached server, write PID file, return immediately. | 0 on success, 1 if a live PID file already exists or the child died on launch, 2 if `OPENAI_API_KEY` is missing. |
+| `stop` | SIGTERM the PID in the PID file (10 s grace, then SIGKILL). | 0 on success or no-op (no PID file), 1 if the process refused to die. |
+| `restart` | Best-effort `stop` then `start`. | Same as `start`. |
+| `status` | Report whether a background server is running. | 0 = running, 3 = not running. |
+| `dev` | Backend with `--reload`; Vite dev server runs separately. | 0 on clean exit. |
+| `doctor` | Print env / dependency diagnostics. | 0. |
+| `version` | Print package version. | 0. |
+| `docker up` | `docker compose up -d` against the bundled `docker-compose.yml`. `--port N` publishes the host port via the `HOST_PORT` env var consumed by compose; `--rebuild` adds `--build`; `--foreground/-f` streams logs instead of detaching. | 0 on success, 2 if `docker` is not on PATH or `docker-compose.yml` is missing, otherwise the compose exit code. |
+| `docker down` | `docker compose down` (use `--volumes/-v` to also drop named volumes; the `./out` bind mount is unaffected). | 0 on success, otherwise the compose exit code. |
+| `docker restart` | Best-effort `docker down` then `docker up`. | Same as `docker up`. |
+| `docker status` | `docker compose ps`. | Pass-through. |
+| `docker logs` | `docker compose logs --tail N -f agent`. `--no-follow` returns immediately; SIGINT (130) while following is treated as a clean exit. | 0 on clean exit. |
 
 `IntakeResponse` shape (matches `IntakeResponse` in
 `src/invoice_agent_web/main.py`):
@@ -148,9 +285,17 @@ at `/assets/*`, so the whole app runs on one port.
   "outbound_text": "...full outbound_email.txt...",
   "outbound_json": { "...InvoicePayload...": "...", "pipeline": { "confidence": 0.8, "flag_count": 1, "shots": [ ... ] } },
   "artifacts": { "outbound_email.txt": "/abs/path", "outbound_email.json": "/abs/path" },
-  "log_tail": "...last ~200 lines of run.log..."
+  "log_tail": "...last ~200 lines of run.log...",
+  "email_filename": "Email.json",
+  "pdf_filename": "Invoice.pdf"
 }
 ```
+
+`email_filename` and `pdf_filename` name the original inbound files
+stored inside the case dir. Either may be `null` (e.g. a hand-built
+minimal case with no PDF). The dashboard fetches them via
+`/api/runs/{case_id}/file/{filename}` to render the source packet
+alongside the extraction output.
 
 Each entry in `pipeline.shots[]` has the shape:
 

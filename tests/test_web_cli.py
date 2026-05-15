@@ -71,7 +71,7 @@ def test_root_help_shows_subcommands_and_examples(
     assert result.exit_code == 0, result.output
     out = result.output
     # All four subcommands must be advertised on the root --help.
-    for cmd in ("up", "dev", "doctor", "version"):
+    for cmd in ("up", "start", "stop", "restart", "status", "dev", "doctor", "version"):
         assert cmd in out, f"missing '{cmd}' in --help output"
     # Examples listed at the top must mention the binary name.
     assert "infotech-email-agent" in out
@@ -84,6 +84,10 @@ def test_root_help_shows_subcommands_and_examples(
     "subcommand,must_contain",
     [
         ("up", ["--port", "--no-browser", "--rebuild", "Examples:", "INVOICE_WEB_HOST"]),
+        ("start", ["--port", "--no-browser", "--rebuild", "out/web/server.pid"]),
+        ("stop", ["SIGTERM", "out/web/server.pid"]),
+        ("restart", ["--port", "--rebuild"]),
+        ("status", ["PID file", "log file"]),
         ("dev", ["Terminal 1", "Terminal 2", "bun run dev", "5173"]),
         ("doctor", ["Example:", "OPENAI_API_KEY", "frontend bundle"]),
         ("version", ["package version"]),
@@ -298,3 +302,230 @@ def test_build_frontend_errors_without_bun(
     with pytest.raises(typer.Exit) as exc:
         web_cli._build_frontend(force=False)
     assert exc.value.exit_code == 2
+
+
+# --------------------------------------------------------------------------- #
+# lifecycle: start / stop / restart / status
+# --------------------------------------------------------------------------- #
+
+
+@pytest.fixture
+def lifecycle_env(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> dict[str, Any]:
+    """Sandbox the PID/log files and stub spawn/terminate so no real process runs."""
+    pid_file = tmp_path / "server.pid"
+    log_file = tmp_path / "server.log"
+    monkeypatch.setattr(web_cli, "_RUNTIME_DIR", tmp_path)
+    monkeypatch.setattr(web_cli, "_PID_FILE", pid_file)
+    monkeypatch.setattr(web_cli, "_LOG_FILE", log_file)
+
+    state: dict[str, Any] = {
+        "spawn_calls": [],
+        "terminate_calls": [],
+        "alive_pids": set(),
+        "next_pid": 4242,
+    }
+
+    def _fake_spawn(host: str, port: int) -> int:
+        pid = int(state["next_pid"])
+        state["next_pid"] = pid + 1
+        state["spawn_calls"].append({"host": host, "port": port, "pid": pid})
+        state["alive_pids"].add(pid)
+        pid_file.write_text(f"{pid}\n")
+        return pid
+
+    def _fake_terminate(pid: int, timeout_s: float = 10.0) -> bool:
+        state["terminate_calls"].append(pid)
+        state["alive_pids"].discard(pid)
+        return True
+
+    def _fake_alive(pid: int) -> bool:
+        return pid in state["alive_pids"]
+
+    monkeypatch.setattr(web_cli, "_spawn_background_server", _fake_spawn)
+    monkeypatch.setattr(web_cli, "_terminate_pid", _fake_terminate)
+    monkeypatch.setattr(web_cli, "_pid_alive", _fake_alive)
+    monkeypatch.setattr(web_cli, "_build_frontend", lambda force=False: None)
+    monkeypatch.setattr(web_cli.webbrowser, "open", lambda url: True)
+    monkeypatch.setattr(web_cli.time, "sleep", lambda _s: None)
+    state["pid_file"] = pid_file
+    state["log_file"] = log_file
+    return state
+
+
+def test_status_exits_3_when_no_pidfile(
+    runner: CliRunner, lifecycle_env: dict[str, Any]
+) -> None:
+    result = runner.invoke(web_cli.app, ["status"])
+    assert result.exit_code == 3, result.output
+    assert "not running" in result.output
+
+
+def test_stop_is_noop_when_no_pidfile(
+    runner: CliRunner, lifecycle_env: dict[str, Any]
+) -> None:
+    result = runner.invoke(web_cli.app, ["stop"])
+    assert result.exit_code == 0, result.output
+    assert "no running server" in result.output
+    assert lifecycle_env["terminate_calls"] == []
+
+
+def test_start_writes_pidfile_and_status_reports_running(
+    runner: CliRunner,
+    monkeypatch: pytest.MonkeyPatch,
+    lifecycle_env: dict[str, Any],
+) -> None:
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test-start")
+    monkeypatch.setattr(web_cli, "load_dotenv", lambda *a, **k: True)
+
+    result = runner.invoke(
+        web_cli.app, ["start", "--no-browser", "--port", "8765"]
+    )
+    assert result.exit_code == 0, result.output
+    assert lifecycle_env["spawn_calls"] == [
+        {"host": "127.0.0.1", "port": 8765, "pid": 4242}
+    ]
+    assert lifecycle_env["pid_file"].is_file()
+    assert lifecycle_env["pid_file"].read_text().strip() == "4242"
+    assert "started" in result.output
+    assert "8765" in result.output
+
+    status_res = runner.invoke(web_cli.app, ["status"])
+    assert status_res.exit_code == 0, status_res.output
+    assert "running" in status_res.output
+    assert "4242" in status_res.output
+
+
+def test_start_refuses_when_pidfile_already_present(
+    runner: CliRunner,
+    monkeypatch: pytest.MonkeyPatch,
+    lifecycle_env: dict[str, Any],
+) -> None:
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test-dupe")
+    monkeypatch.setattr(web_cli, "load_dotenv", lambda *a, **k: True)
+    # Pre-seed a live PID.
+    lifecycle_env["pid_file"].write_text("9999\n")
+    lifecycle_env["alive_pids"].add(9999)
+
+    result = runner.invoke(web_cli.app, ["start", "--no-browser"])
+    assert result.exit_code == 1, result.output
+    assert "already running" in result.output
+    assert lifecycle_env["spawn_calls"] == []
+
+
+def test_start_exits_2_without_openai_key(
+    runner: CliRunner,
+    monkeypatch: pytest.MonkeyPatch,
+    lifecycle_env: dict[str, Any],
+) -> None:
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.setattr(web_cli, "load_dotenv", lambda *a, **k: False)
+    result = runner.invoke(web_cli.app, ["start", "--no-browser"])
+    assert result.exit_code == 2, result.output
+    assert "OPENAI_API_KEY" in result.output
+    assert lifecycle_env["spawn_calls"] == []
+
+
+def test_stop_terminates_running_server_and_removes_pidfile(
+    runner: CliRunner, lifecycle_env: dict[str, Any]
+) -> None:
+    lifecycle_env["pid_file"].write_text("4242\n")
+    lifecycle_env["alive_pids"].add(4242)
+
+    result = runner.invoke(web_cli.app, ["stop"])
+    assert result.exit_code == 0, result.output
+    assert lifecycle_env["terminate_calls"] == [4242]
+    assert not lifecycle_env["pid_file"].exists()
+    assert "stopped" in result.output
+
+
+def test_restart_stops_then_starts(
+    runner: CliRunner,
+    monkeypatch: pytest.MonkeyPatch,
+    lifecycle_env: dict[str, Any],
+) -> None:
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test-restart")
+    monkeypatch.setattr(web_cli, "load_dotenv", lambda *a, **k: True)
+    lifecycle_env["pid_file"].write_text("1111\n")
+    lifecycle_env["alive_pids"].add(1111)
+
+    result = runner.invoke(web_cli.app, ["restart", "--port", "9001"])
+    assert result.exit_code == 0, result.output
+    assert lifecycle_env["terminate_calls"] == [1111]
+    assert len(lifecycle_env["spawn_calls"]) == 1
+    assert lifecycle_env["spawn_calls"][0]["port"] == 9001
+    # Fresh PID was written, not the old one.
+    assert lifecycle_env["pid_file"].read_text().strip() == "4242"
+
+
+def test_restart_works_when_nothing_was_running(
+    runner: CliRunner,
+    monkeypatch: pytest.MonkeyPatch,
+    lifecycle_env: dict[str, Any],
+) -> None:
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test-cold-restart")
+    monkeypatch.setattr(web_cli, "load_dotenv", lambda *a, **k: True)
+    result = runner.invoke(web_cli.app, ["restart"])
+    assert result.exit_code == 0, result.output
+    assert lifecycle_env["terminate_calls"] == []
+    assert len(lifecycle_env["spawn_calls"]) == 1
+
+
+def test_read_pidfile_clears_stale_entry(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    pid_file = tmp_path / "server.pid"
+    pid_file.write_text("424242\n")
+    monkeypatch.setattr(web_cli, "_PID_FILE", pid_file)
+    monkeypatch.setattr(web_cli, "_pid_alive", lambda _pid: False)
+    assert web_cli._read_pidfile() is None
+    assert not pid_file.exists(), "stale pidfile should be removed"
+
+
+def test_read_pidfile_ignores_garbage(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    pid_file = tmp_path / "server.pid"
+    pid_file.write_text("not-a-pid\n")
+    monkeypatch.setattr(web_cli, "_PID_FILE", pid_file)
+    assert web_cli._read_pidfile() is None
+
+
+def test_pid_alive_returns_false_for_nonpositive() -> None:
+    assert web_cli._pid_alive(0) is False
+    assert web_cli._pid_alive(-1) is False
+
+
+# --------------------------------------------------------------------------- #
+# config show / config path
+# --------------------------------------------------------------------------- #
+
+
+def test_config_show_prints_paths_and_resolved_settings(
+    runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test-cfg")
+    result = runner.invoke(web_cli.app, ["config", "show"])
+    assert result.exit_code == 0, result.output
+    out = result.output
+    for label in (
+        "Config sources",
+        "global TOML",
+        "project TOML",
+        "OPENAI_API_KEY",
+        "Resolved settings",
+        "agent_model",
+        "extract_model",
+        "web_port",
+        "llm_disabled",
+    ):
+        assert label in out, f"config show missing '{label}': {out}"
+
+
+def test_config_path_is_machine_friendly(runner: CliRunner) -> None:
+    result = runner.invoke(web_cli.app, ["config", "path"])
+    assert result.exit_code == 0, result.output
+    lines = [ln for ln in result.output.strip().splitlines() if ln]
+    assert any(ln.startswith("global=") for ln in lines)
+    assert any(ln.startswith("project=") for ln in lines)

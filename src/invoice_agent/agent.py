@@ -1,9 +1,12 @@
-"""Agents SDK wiring for the invoice intake workflow.
+"""Run one invoice intake end to end.
 
-Behaviourally identical to the previous procedural module: same public
-surface (``run_intake``, ``IntakeResult``, ``build_agent``), same log
-strings, same artefact layout. Internally decomposed into small
-collaborating objects so each method does one thing.
+Public surface: ``run_intake``, ``IntakeResult``, ``build_agent``.
+
+``run_intake`` is a thin facade over ``_IntakeRun.execute``, which
+walks the six pipeline shots in order (see
+``invoice_agent.pipeline``) and writes the outbound packet under
+``out_dir``. The agent itself is built in ``build_agent``: one
+system prompt, two tools (extract + notify), one allow-listed model.
 """
 
 from __future__ import annotations
@@ -20,7 +23,6 @@ from agents import Agent, Runner
 from invoice_agent.evidence import (
     quote_for_arithmetic,
     quote_for_disagreement,
-    quote_for_low_confidence,
     quote_for_regex_finding,
     quotes_for_email_injection,
 )
@@ -414,26 +416,42 @@ class _IntakeRun:
     _payload: dict[str, object] = field(default_factory=dict, init=False)
     _result: object = field(default=None, init=False)
     _inj_llm_findings: list[str] = field(default_factory=list, init=False)
+    _pdf_text_cache: str | None = field(default=None, init=False)
 
     # ---- public entry point -----------------------------------------
+
+    def _pdf_text(self) -> str:
+        """Extract PDF text once per run; reused across critic + injection shots."""
+        if self._pdf_text_cache is None:
+            self._pdf_text_cache = extract_pdf_content(self.pdf_path).text
+        return self._pdf_text_cache
 
     def execute(self) -> IntakeResult:
         self._resolve_email_path()
         self._read_and_parse_email()
         self.pdf_path = self._resolve_and_check_pdf()
         self._prepare_out_dir()
-        self._shot_pre_flight()
-        self._invoke_agent()
-        self._collect_agent_usage()
-        self._collect_extract_usage()
-        self._load_emitted_payload()
-        self._shot_extract()
-        self._shot_arithmetic()
-        self._shot_critic()
-        self._shot_injection()
-        self._shot_finalise()
-        self._log_pipeline_complete()
-        return self._build_result()
+        try:
+            self._shot_pre_flight()
+            self._invoke_agent()
+            self._collect_agent_usage()
+            self._collect_extract_usage()
+            self._load_emitted_payload()
+            self._shot_extract()
+            self._shot_arithmetic()
+            self._shot_critic()
+            self._shot_injection()
+            self._shot_finalise()
+            self._log_pipeline_complete()
+            return self._build_result()
+        finally:
+            # Always emit a usage_total summary line, even if a late
+            # shot raised. Guarded so a logging hiccup never masks the
+            # original exception.
+            try:
+                self._usage.log_summary(log)
+            except Exception as exc:  # noqa: BLE001 — observability is best-effort
+                log.warning("usage: log_summary failed: %s", exc)
 
     # ---- step 1: input resolution -----------------------------------
 
@@ -617,7 +635,7 @@ class _IntakeRun:
         )
 
     def _do_critic_review(self) -> tuple[list[str], list[Evidence]]:
-        pdf_text = extract_pdf_content(self.pdf_path).text
+        pdf_text = self._pdf_text()
         report = verify_extraction(
             payload_json=json.dumps(self._payload, ensure_ascii=False),
             pdf_text=pdf_text,
@@ -625,15 +643,27 @@ class _IntakeRun:
             model=_CRITIC_MODEL,
             usage_sink=self._usage.sink_for("critic_review", _CRITIC_MODEL),
         )
+        # Citable-evidence gate: only count findings that point to a
+        # concrete claim about the document. Verifier disagreements
+        # carry an explicit v1_value vs suggested_value pair (concrete
+        # cite). `low_confidence_<field>` is the verifier's own grade
+        # with no anchor in the source text — drop it from FLAGs to
+        # avoid weak-model noise dominating the confidence ledger. The
+        # dropped grades are still logged for observability.
         findings: list[str] = []
         evidence: list[Evidence] = []
         for d in report.disagreements:
             findings.append(f"verifier_disagreement_{d.field}")
             evidence.append(quote_for_disagreement(d))
-        for score in report.field_confidence:
-            if score.level == "low":
-                findings.append(f"low_confidence_{score.field}")
-                evidence.append(quote_for_low_confidence(score.field))
+        dropped_low: list[str] = [
+            score.field for score in report.field_confidence if score.level == "low"
+        ]
+        if dropped_low:
+            log.info(
+                "critic_review: dropped %d low_confidence grade(s) without"
+                " citable evidence: %s",
+                len(dropped_low), dropped_low,
+            )
         return findings, evidence
 
     # ---- step 8: shot 4 (injection) ---------------------------------
@@ -650,37 +680,79 @@ class _IntakeRun:
         )
 
     def _do_injection_screen(self) -> tuple[list[str], list[Evidence]]:
-        pdf_text = extract_pdf_content(self.pdf_path).text
+        pdf_text = self._pdf_text()
         combined = f"{self._email.body_text}\n---\n{pdf_text}"
-        findings = injection_screen(
+        raw_findings = injection_screen(
             text=combined,
             client=self.openai_client,
             model=_CRITIC_MODEL,
             usage_sink=self._usage.sink_for("injection_screen", _CRITIC_MODEL),
         )
-        # The LLM screen returns free-form snake_case tags. For tags that
-        # match a known regex pattern, re-run the regex against the
-        # combined text to surface a precise quote; otherwise emit a
-        # generic Evidence row pointing at the document.
+        # Citable-evidence gate. The LLM screen returns free-form
+        # snake_case tags. We only count a finding if at least one of
+        # these is true:
+        #   (a) the tag matches a known regex in `_INJECTION_PATTERNS`
+        #       AND that pattern actually hits the combined text
+        #       (concrete substring evidence), OR
+        #   (b) the tag is the canonical aggregate
+        #       `prompt_injection_attempt_in_document` AND the
+        #       deterministic scanner ALSO finds at least one specific
+        #       pattern in the combined text (regex agreement = real).
+        # Tags the LLM hallucinated without any anchor in the source
+        # are dropped; they would otherwise become FLAGs with a
+        # generic placeholder, which is exactly the weak-model noise
+        # we are filtering out.
+        findings: list[str] = []
         evidence: list[Evidence] = []
-        for tag in findings:
+        agg_tag = "prompt_injection_attempt_in_document"
+        det_hits: list[str] | None = None  # lazy: only compute if needed
+        for tag in raw_findings:
             ev = quote_for_regex_finding(
                 tag, combined, source="pdf_text", location="email + pdf_text"
             )
-            if ev is None:
-                evidence.append(
-                    Evidence(
-                        finding=tag,
+            if ev is not None:
+                findings.append(tag)
+                evidence.append(ev)
+                continue
+            if tag == agg_tag:
+                if det_hits is None:
+                    det_hits = scan_for_injection(combined)
+                if det_hits:
+                    # Aggregate flag is real: deterministic regex agrees.
+                    # Cite using the first concrete pattern as evidence.
+                    # `cite` is logically guaranteed to be non-None here
+                    # because `det_hits[0]` came from `scan_for_injection`
+                    # against the same `combined` text using the same
+                    # `_INJECTION_PATTERNS`. The `if cite is not None`
+                    # check below is purely defensive.
+                    cite = quote_for_regex_finding(
+                        det_hits[0],
+                        combined,
                         source="pdf_text",
-                        quote=(
-                            "LLM injection screen flagged this tag; see the "
-                            "PDF and email body for the offending text."
-                        ),
                         location="email + pdf_text",
                     )
-                )
-            else:
-                evidence.append(ev)
+                    if cite is not None:  # pragma: no branch
+                        findings.append(tag)
+                        evidence.append(
+                            Evidence(
+                                finding=tag,
+                                source=cite.source,
+                                quote=(
+                                    f"deterministic scanner agrees "
+                                    f"({det_hits!r}); sample: {cite.quote}"
+                                ),
+                                location=cite.location,
+                            )
+                        )
+                        continue
+            # Drop: no citable anchor.
+        dropped = [t for t in raw_findings if t not in findings]
+        if dropped:
+            log.info(
+                "injection_screen: dropped %d finding(s) without citable"
+                " evidence: %s",
+                len(dropped), dropped,
+            )
         return findings, evidence
 
     def _run_llm_shot(
@@ -693,7 +765,9 @@ class _IntakeRun:
         try:
             findings, evidence = body()
         except Exception as exc:  # noqa: BLE001 — recorded as FAIL, not silent
-            log.warning("%s FAILED: %s", shot_name, exc)
+            # Full traceback into the per-run log so AP / ops can see the
+            # real cause; the short message also lands in pipeline state.
+            log.warning("%s FAILED: %s", shot_name, exc, exc_info=True)
             self._state.fail(shot_name, "llm", _CRITIC_MODEL, str(exc)[:120])
             return
         self._state.record(
@@ -722,17 +796,29 @@ class _IntakeRun:
         # Attach the usage envelope as a sibling of `pipeline` BEFORE
         # rewriting the JSON file so observability lands on disk.
         self._payload["usage"] = self._usage.as_envelope()
-        _finalise_outbound(
-            out_txt_path=txt_path,
-            out_json_path=json_path,
-            payload=self._payload,
-            state=self._state,
-        )
+        try:
+            _finalise_outbound(
+                out_txt_path=txt_path,
+                out_json_path=json_path,
+                payload=self._payload,
+                state=self._state,
+            )
+        except OSError as exc:
+            # Filesystem failure during the rewrite must not undo a
+            # successful pipeline. Log loudly; the agent already wrote
+            # the un-banner'd outbound files via the notify tool.
+            log.warning(
+                "synthesis_finalise: cannot rewrite outbound files (%s); "
+                "keeping agent-emitted artefacts as-is",
+                exc,
+            )
 
     # ---- step 10: completion ----------------------------------------
 
     def _log_pipeline_complete(self) -> None:
-        self._usage.log_summary(log)
+        # NOTE: ``_usage.log_summary`` is emitted from the ``finally``
+        # block in :meth:`execute` so it is recorded even when a late
+        # shot raises. Do not call it here too \u2014 that would double-log.
         log.info(
             "pipeline complete confidence=%.2f shots=%d flags=%d",
             self._state.confidence,

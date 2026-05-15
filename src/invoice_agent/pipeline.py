@@ -1,41 +1,44 @@
-"""Multi-shot orchestration with progressive confidence scoring.
+"""The confidence ledger.
 
-This module owns the **pipeline** abstraction: a fixed ordered sequence of
-"shots" that each contribute to a running confidence score in
-``[0.0, 1.0]``. Every shot emits one structured log line and produces zero
-or more snake_case findings that are merged into the final artefact's
-``risk_flags``.
+One run = six steps ("shots"), in order. Each shot writes one row
+into a ``PipelineState`` and moves a single number called
+``confidence`` (clamped to ``[0.0, 1.0]``, starts at 0.50). Every
+row becomes one structured log line and is also embedded in the
+final ``outbound_email.json`` so the dashboard can render the full
+timeline.
 
-Shots in order (driven by ``invoice_agent.agent.run_intake``):
+The six shots, in order (driven by ``invoice_agent.agent.run_intake``):
 
-  0. ``pre_flight``        — deterministic email scan (regex injection,
-                              attachment validation).
-  1. ``extract``           — LLM (vision) observation, recorded from the
-                              agent's emitted payload (no extra LLM call).
-  2. ``arithmetic_check``  — deterministic math + format checks.
-  3. ``critic_review``     — LLM (gpt-5-nano) cross-checks JSON vs raw
-                              PDF text. SKIPPED when no client is given.
-  4. ``injection_screen``  — LLM (gpt-5-nano) dedicated injection scan.
-                              SKIPPED when no client is given.
-  5. ``synthesis_finalise`` — deterministic rewrite of outbound files
-                              with the confidence banner + envelope.
+  0. ``pre_flight``         — regex scan of the email body.
+  1. ``extract``            — observation of what the agent emitted.
+  2. ``arithmetic_check``   — totals, dates, currency format.
+  3. ``critic_review``      — small-LLM critic (skipped if no client).
+  4. ``injection_screen``   — small-LLM injection scan (skipped if no client).
+  5. ``synthesis_finalise`` — rewrite outbound files with the banner.
 
-Decision math (deterministic, easy to test):
+Confidence math (kept boring on purpose so tests can pin it down):
 
-    start                           = 0.50
-    PASS  (deterministic shot)      = +0.10
-    PASS  (LLM shot)                = +0.05
-    FLAG  (deterministic, per find) = -0.10, capped at -0.20 per shot
-    FLAG  (LLM, per find)           = -0.05, capped at -0.15 per shot
-    FAIL  (any shot)                = -0.30
-    SKIPPED                         =  0.00
+    start                            = 0.50
+    PASS  (deterministic shot)       = +0.10
+    PASS  (LLM shot)                 = +0.10
+    FLAG  (deterministic, per find)  = -0.10, capped at -0.20 per shot
+    FLAG  (LLM, per find)            = -0.05, capped at -0.15 per shot
+    FAIL  (any shot)                 = -0.30
+    SKIPPED                          =  0.00
 
-Architectural notes:
-  - Demeter: callers depend only on ``PipelineState.record`` /
-    ``PipelineState.skip`` and the dataclasses; they do not poke at
-    private fields.
-  - Append-only: adding a new shot is a minor change; reordering /
-    removing is breaking and must update ``docs/ARCHITECTURE.md``.
+Note on PASS symmetry: deterministic and LLM PASS rewards are equal
+(+0.10) so a fully clean run hits 1.00 by shot 6. FLAG penalties are
+still asymmetric — LLM flags get a smaller per-finding bite (-0.05)
+and a tighter per-shot cap (-0.15) because weak models are noisier
+than deterministic guardrails. Upstream callers (see
+``agent._do_critic_review`` / ``agent._do_injection_screen``) drop
+LLM findings that lack a citable evidence quote BEFORE recording, so
+the ledger only sees flags that point to real document text.
+
+Callers only touch ``PipelineState.record`` / ``.skip`` / ``.fail``
+and the dataclasses. Adding a new shot is safe; reordering or
+removing one is a breaking change and must update
+``docs/ARCHITECTURE.md`` and ``docs/WALKTHROUGH.md``.
 """
 
 from __future__ import annotations
@@ -51,7 +54,7 @@ log = logging.getLogger(__name__)
 START_CONFIDENCE: Final[float] = 0.50
 
 _PASS_DELTA_DET: Final[float] = 0.10
-_PASS_DELTA_LLM: Final[float] = 0.05
+_PASS_DELTA_LLM: Final[float] = 0.10
 _FLAG_DELTA_PER_DET: Final[float] = -0.10
 _FLAG_DELTA_PER_LLM: Final[float] = -0.05
 _FLAG_DELTA_CAP_DET: Final[float] = -0.20

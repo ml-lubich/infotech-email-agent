@@ -16,6 +16,14 @@ wheels/
 /out/
 run.log
 
+# Centralized logs (logs/{cli,web,runs}/)
+/logs/
+
+# macOS / editor cruft
+.DS_Store
+*.swp
+*.swo
+
 # Coverage
 .coverage
 htmlcov/
@@ -24,3 +32,6 @@ coverage.xml
 
 # Local scratch
 /tmp/
+
+# TS incremental build cache
+*.tsbuildinfo

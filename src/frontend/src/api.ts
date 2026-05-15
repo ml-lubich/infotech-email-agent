@@ -2,6 +2,7 @@ import type {
     ExampleCase,
     HealthResponse,
     IntakeResponse,
+    StoredRun,
 } from "./types";
 
 const BASE = "/api";
@@ -53,4 +54,30 @@ export async function runExample(name: string): Promise<IntakeResponse> {
     return unwrap<IntakeResponse>(
         await fetch(`${BASE}/intake/example`, { method: "POST", body: fd }),
     );
+}
+
+export async function listRuns(): Promise<StoredRun[]> {
+    const data = await unwrap<{ runs: StoredRun[] }>(
+        await fetch(`${BASE}/runs`),
+    );
+    return data.runs;
+}
+
+export async function getRun(caseId: string): Promise<IntakeResponse> {
+    return unwrap<IntakeResponse>(
+        await fetch(`${BASE}/runs/${encodeURIComponent(caseId)}`),
+    );
+}
+
+export function downloadRunUrl(caseId: string): string {
+    return `${BASE}/runs/${encodeURIComponent(caseId)}/download`;
+}
+
+/**
+ * Build the URL for a single source file inside a case dir (the
+ * original Email.json or invoice PDF). Used by SourcePanel to render
+ * the inbound packet via <iframe> / fetch().
+ */
+export function runFileUrl(caseId: string, filename: string): string {
+    return `${BASE}/runs/${encodeURIComponent(caseId)}/file/${encodeURIComponent(filename)}`;
 }

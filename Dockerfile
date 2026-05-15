@@ -24,12 +24,13 @@ FROM oven/bun:1.3-alpine AS frontend
 WORKDIR /frontend
 
 # Install JS deps with cache mount (lockfile-driven).
-COPY frontend/package.json frontend/bun.lock* ./
+# Source lives at src/frontend/ so the whole project sits under src/.
+COPY src/frontend/package.json src/frontend/bun.lock* ./
 RUN --mount=type=cache,target=/root/.bun \
     bun install --frozen-lockfile || bun install
 
 # Build the Vite bundle.
-COPY frontend/ ./
+COPY src/frontend/ ./
 RUN bun run build
 
 # ---- 2. Python base (uv) --------------------------------------------------
@@ -60,7 +61,9 @@ RUN curl -LsSf https://astral.sh/uv/install.sh | sh
 WORKDIR /app
 
 # Lock-first install (better layer caching).
-COPY pyproject.toml uv.lock README.md ./
+# LICENSE is referenced by pyproject.toml metadata, so it must be present
+# during `uv sync` or hatchling fails with: "License file does not exist".
+COPY pyproject.toml uv.lock README.md LICENSE ./
 COPY src/ ./src/
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --frozen --no-dev
@@ -71,10 +74,11 @@ COPY main.py ./
 COPY scripts/ ./scripts/
 COPY examples/ ./examples/
 COPY docs/ ./docs/
+COPY config/ ./config/
 
 # Drop the prebuilt frontend bundle into the location the FastAPI adapter
-# serves from (FRONTEND_DIST = repo_root / "frontend" / "dist").
-COPY --from=frontend /frontend/dist/ ./frontend/dist/
+# serves from (FRONTEND_DIST = repo_root / "src" / "frontend" / "dist").
+COPY --from=frontend /frontend/dist/ ./src/frontend/dist/
 
 # ---- 3. Runtime image -----------------------------------------------------
 FROM base AS runtime

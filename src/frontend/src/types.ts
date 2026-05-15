@@ -26,6 +26,30 @@ export interface PipelineEnvelope {
     shots: PipelineShot[];
 }
 
+export interface UsageShot {
+    shot: string;
+    model: string;
+    input_tokens: number;
+    output_tokens: number;
+    total_tokens: number;
+    cached_input_tokens: number;
+    reasoning_tokens: number;
+}
+
+export interface UsageTotals {
+    input_tokens: number;
+    output_tokens: number;
+    total_tokens: number;
+    cached_input_tokens: number;
+    reasoning_tokens: number;
+}
+
+export interface UsageEnvelope {
+    totals: UsageTotals;
+    cache_hit_ratio: number;
+    shots: UsageShot[];
+}
+
 export interface TaxLine {
     label?: string | null;
     amount?: number | null;
@@ -58,6 +82,7 @@ export interface OutboundInvoice {
     risk_flags?: string[] | null;
     email_context?: Record<string, unknown> | null;
     pipeline?: PipelineEnvelope;
+    usage?: UsageEnvelope;
     [key: string]: unknown;
 }
 
@@ -68,6 +93,11 @@ export interface IntakeResponse {
     outbound_json: OutboundInvoice;
     artifacts: Record<string, string>;
     log_tail: string;
+    // Names of the original inbound files inside the case dir. The
+    // dashboard fetches them via /api/runs/{case_id}/file/{filename} to
+    // render the source email + PDF alongside the extraction output.
+    email_filename?: string | null;
+    pdf_filename?: string | null;
 }
 
 export interface ExampleCase {
@@ -86,4 +116,13 @@ export interface HealthResponse {
 export interface ApiError {
     status: number;
     message: string;
+}
+
+export interface StoredRun {
+    case_id: string;
+    label: string;
+    created_at: number;
+    has_outbound: boolean;
+    file_count: number;
+    size_bytes: number;
 }

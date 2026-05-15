@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { downloadRunUrl } from "../api";
 import type { IntakeResponse } from "../types";
 
 interface Props {
@@ -12,7 +13,17 @@ export function OutboundPanel({ result }: Props) {
 
     return (
         <div className="card">
-            <h2>Outbound packet</h2>
+            <div className="outbound-header">
+                <h2>Outbound packet</h2>
+                <a
+                    className="btn"
+                    href={downloadRunUrl(result.case_id)}
+                    download={`${result.case_id}.zip`}
+                    title="Download all artefacts (Email.json, Invoice.pdf, outbound_email.{txt,json}, run.log) as a single .zip"
+                >
+                    ⇣ Download .zip
+                </a>
+            </div>
             <div className="tabs">
                 <button
                     className={tab === "summary" ? "active" : ""}

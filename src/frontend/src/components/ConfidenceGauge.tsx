@@ -83,6 +83,18 @@ export function ConfidenceGauge({ envelope }: Props) {
                             <span className="lg-skip">skip</span>
                         </span>
                     </div>
+                    <p
+                        style={{
+                            color: "var(--text-2)",
+                            fontSize: 12,
+                            margin: "2px 0 8px",
+                            lineHeight: 1.4,
+                        }}
+                    >
+                        Bar height = running confidence after that shot. Hover any bar for the
+                        decision. Confidence starts at 50%; deterministic PASS adds 10pp,
+                        LLM PASS adds 5pp, FAIL drops 30pp.
+                    </p>
                     <div className="bars">
                         {shots.map((s, i) => {
                             const c = shotConfidence(s);

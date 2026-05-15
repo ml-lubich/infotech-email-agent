@@ -1,6 +1,6 @@
 [project]
 name = "invoice-intake-agent"
-version = "0.1.0"
+version = "0.2.0"
 description = "Invoice intake agent built on the OpenAI Agents SDK."
 readme = "README.md"
 license = { file = "LICENSE" }
@@ -17,10 +17,10 @@ dependencies = [
     "uvicorn[standard]>=0.34.0",
     "python-multipart>=0.0.20",
     "typer>=0.20.0",
+    "platformdirs>=4.3.6",
 ]
 
 [project.scripts]
-invoice-intake = "invoice_agent.cli:main"
 infotech-email-agent = "invoice_agent_web.cli:main"
 
 [build-system]

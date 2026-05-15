@@ -1,27 +1,28 @@
-"""Deterministic prompt-injection guardrails (input + output).
+"""Plain-Python prompt-injection checks (input + output).
 
-Why: the assignment constrains us to small models (`gpt-5-mini` /
-`gpt-5-nano`). 2026 best practice for Agents SDK pipelines on weak models
-is **defense in depth**: the system prompt declares the trust boundary,
-AND a non-LLM layer enforces it so a fully jailbroken model still cannot:
+Why this exists: the agent itself runs on a small LLM, and small
+LLMs are easier to jailbreak. So we wrap the LLM with non-LLM
+checks. Even a fully tricked model cannot:
 
-  - silently drop the `prompt_injection_attempt_in_document` risk flag,
-  - emit "APPROVED" / "auto-approved" in the AP-facing summary,
-  - skip downstream checks based on text inside the document.
+  - drop the ``prompt_injection_attempt_in_document`` flag,
+  - emit "APPROVED" / "auto-approved" in the AP summary,
+  - skip downstream checks based on something the document said.
 
-This module exposes:
-  * `scan_for_injection(text)` — input guardrail (regex, deterministic).
-  * `scan_output_for_unsafe_directives(summary)` — output guardrail.
-  * `apply_output_guardrails(...)` — additive merge of guardrail signals
-    into the structured payload + a visible safety banner on the summary.
-  * `publish_injection_signals` / `read_injection_signals` — env-var side
-    channel so `run_intake` (which sees the raw email) can hand off to
-    the notify tool (which writes the artefact) without the LLM in the
-    middle being able to suppress the signal.
+What this module exposes:
+  * ``scan_for_injection(text)`` — regex over the email body.
+  * ``scan_output_for_unsafe_directives(summary)`` — regex over the
+    AP-facing summary the agent produced.
+  * ``apply_output_guardrails(...)`` — merge guardrail signals into
+    the payload's ``risk_flags`` and append a visible safety banner.
+  * ``publish_injection_signals`` / ``read_injection_signals`` —
+    a tiny env-var hand-off so ``run_intake`` (which sees the raw
+    email) can pass signals to the notify tool (which writes the
+    artefact) without the LLM in the middle being able to suppress
+    them.
 
-Architecture note (Demeter / DIP): this module owns the policy. Callers
-(`agent.py`, `tools.py`) only depend on these stable functions; they do
-not assemble regexes themselves.
+This module owns the policy. Other modules (``agent.py``,
+``tools.py``) only call these functions; they never build regexes
+themselves.
 """
 
 from __future__ import annotations

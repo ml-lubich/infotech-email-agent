@@ -58,14 +58,14 @@ That single Typer CLI (`infotech-email-agent`) ships:
 | Command  | What it does |
 |---|---|
 | `up`      | Build the React/Vite dashboard if missing, serve API + UI on one port (default `:8000`), open the browser. |
-| `dev`     | Backend with `--reload`; run `bun run dev` in `frontend/` for hot-reload UI. |
+| `dev`     | Backend with `--reload`; run `bun run dev` in `src/frontend/` for hot-reload UI. |
 | `doctor`  | Colour diagnostics: `OPENAI_API_KEY`, Python/Bun versions, bundle status. |
 | `version` | Print the installed semver. |
 
 CLI-only batch mode (no browser) is still available:
 
 ```bash
-uv run invoice-intake --email ./examples/case_7_jpy_no_decimals/Email.json
+uv run python main.py --email ./examples/case_7_jpy_no_decimals/Email.json
 ```
 
 The dashboard renders a confidence gauge, risk-flag chips
@@ -82,11 +82,13 @@ shipped fixtures.
 - [Trust boundary](#trust-boundary)
 - [Model policy](#model-policy)
 - [Setup](#setup)
+- [Configuration](#configuration)
 - [Run](#run)
 - [Outputs](#outputs)
 - [Examples](#examples)
 - [Lifecycle](#lifecycle)
 - [Project layout](#project-layout)
+- [Maintainability](#maintainability)
 - [Docs](#docs)
 - [Tests](#tests)
 - [Error handling](#error-handling)
@@ -182,6 +184,27 @@ process aborts. The agent runs each tool exactly once to conserve tokens.
 
 ## Setup
 
+**One-shot installer (recommended on macOS / Linux):**
+
+```bash
+./scripts/install.sh
+```
+
+That script (re-runnable, idempotent) will:
+1. Install `uv` if missing (official installer, no sudo).
+2. Run `uv sync` (Python deps + venv).
+3. Scaffold `.env` from `.env.example` if missing.
+4. Scaffold the global TOML config at the OS-correct path
+   (`~/Library/Application Support/infotech-email-agent/config.toml` on
+   macOS; `${XDG_CONFIG_HOME:-~/.config}/infotech-email-agent/config.toml`
+   on Linux) — only if it doesn't already exist.
+5. Build the React dashboard bundle if Bun is installed.
+
+Flags: `--no-frontend` skips the bun build; `--force-config` overwrites
+the existing global config.
+
+**Manual setup (if you prefer):**
+
 ```bash
 uv sync
 cp .env.example .env
@@ -190,17 +213,52 @@ cp .env.example .env
 
 `.env` is git-ignored; never commit credentials.
 
+## Configuration
+
+Configuration is layered with a single, documented precedence chain
+(highest wins last). This is the only place the cascade is defined —
+everything else delegates to [src/invoice_agent/config.py](src/invoice_agent/config.py).
+
+| Layer | Where | Win order |
+|---|---|---|
+| Hardcoded defaults | `Settings` model in `config.py` | lowest |
+| Global / per-user config | `~/Library/Application Support/infotech-email-agent/config.toml` (macOS) · `${XDG_CONFIG_HOME:-~/.config}/infotech-email-agent/config.toml` (Linux) | |
+| Project config | `./infotech-email-agent.toml` (flat keys) **or** `./pyproject.toml` table `[tool.infotech-email-agent]` | |
+| Environment variables | `INFOTECH_*` (canonical) or `INVOICE_*` (legacy alias) | |
+| Command-line flags | `infotech-email-agent --port 9000`, etc. | highest |
+
+Secrets (`OPENAI_API_KEY`) come from `.env` / your shell only — never
+from a TOML file.
+
+**Tunable keys** (all optional):
+
+| TOML key | Env var (canonical / legacy) | Default | Notes |
+|---|---|---|---|
+| `agent_model` | `INFOTECH_AGENT_MODEL` / `INVOICE_AGENT_MODEL` | `gpt-5-mini` | Allow-list enforced. |
+| `extract_model` | `INFOTECH_EXTRACT_MODEL` / `INVOICE_EXTRACT_MODEL` | `gpt-5-mini` | Vision-capable shot. |
+| `critic_model` | `INFOTECH_CRITIC_MODEL` / `INVOICE_CRITIC_MODEL` | `gpt-5-nano` | Pass 3 / Pass 4. |
+| `web_host` | `INFOTECH_WEB_HOST` / `INVOICE_WEB_HOST` | `127.0.0.1` | Dashboard bind host. |
+| `web_port` | `INFOTECH_WEB_PORT` / `INVOICE_WEB_PORT` | `8000` | Dashboard port. |
+| `web_runs_dir` | `INFOTECH_WEB_RUNS_DIR` / `INVOICE_WEB_RUNS_DIR` | `./out/web` | Per-request case dirs. |
+| `llm_disabled` | `INFOTECH_PIPELINE_LLM_DISABLED` / `INVOICE_PIPELINE_LLM_DISABLED` | `false` | Skip Pass 3 + Pass 4. |
+
+A bad value (unknown model, non-integer port, malformed TOML) aborts
+startup with a clear error — there are no silent fallbacks.
+
 ## Run
 
-```bash
-uv run python main.py --email ./examples/case_1/Email.json
-```
+### One-shot CLI (no browser, no Docker)
 
-Equivalent (after `uv sync`):
+The simplest way to run a single case end-to-end:
 
 ```bash
-uv run invoice-intake --email ./examples/case_1/Email.json
+uv sync                                                         # one-time
+echo "OPENAI_API_KEY=sk-..." > .env                             # one-time
+uv run invoice-intake --email ./examples/case_1/Email.json      # go!
 ```
+
+That writes `outbound_email.{txt,json}` + `run.log` under
+`./out/case_1/` and prints the agent reply.
 
 Useful flags:
 
@@ -210,6 +268,46 @@ Useful flags:
   `./out/<email-parent-folder-name>/`).
 - `--log-file <path>` — where to write the run log (default:
   `<out-dir>/run.log`).
+
+To skip the two LLM verification passes (Pass 3 + Pass 4) and keep the
+OpenAI bill down while iterating:
+
+```bash
+INFOTECH_PIPELINE_LLM_DISABLED=1 uv run invoice-intake --email ./examples/case_1/Email.json
+```
+
+### Configuration — one file, used by both CLI and Docker
+
+The repo ships a single TOML at [config/config.toml](config/config.toml).
+Both the host CLI and the Docker container read it (the container mounts
+`./config:/app/config:ro` via `docker-compose.yml`), so you only edit one
+place.
+
+Inspect what the agent will actually use:
+
+```bash
+uv run infotech-email-agent config show     # pretty: paths + resolved settings
+uv run infotech-email-agent config path     # machine-friendly: global=… project=…
+```
+
+Precedence (lowest → highest, later wins):
+
+1. Hardcoded defaults
+2. Global TOML (per-user, OS-appropriate path — `config show` prints it)
+3. **`config/config.toml`** in the repo  ← the recommended place to edit
+4. Environment variables (`INFOTECH_*`; `INVOICE_*` honored as legacy alias)
+5. CLI flags
+
+Secrets (`OPENAI_API_KEY`) only ever come from `.env` / the environment —
+never from a TOML file.
+
+### Legacy entrypoint
+
+```bash
+uv run python main.py --email ./examples/case_1/Email.json
+```
+
+…is still wired up and equivalent to `uv run invoice-intake`.
 
 ## Outputs
 
@@ -328,16 +426,88 @@ tests/                           # offline pytest suite (no API calls)
 out/                             # generated; per-case artifacts (git-ignored)
 ```
 
+## Maintainability
+
+If you (future-you) come back to this repo cold, here is how to stay
+sane and ship changes without drift.
+
+**Where things live**
+
+- **All Python source**: [src/invoice_agent/](src/invoice_agent/) (core
+  pipeline + tools) and [src/invoice_agent_web/](src/invoice_agent_web/)
+  (FastAPI adapter + Typer CLI).
+- **Frontend**: [src/frontend/](src/frontend/) (Vite + React, single
+  page). Built bundle lands at `src/frontend/dist/`.
+- **Configuration cascade**: [src/invoice_agent/config.py](src/invoice_agent/config.py).
+  Touch this — and only this — to add a new tunable knob.
+- **Model allow-list**: [src/invoice_agent/models.py](src/invoice_agent/models.py).
+  The single chokepoint that enforces "only `gpt-5-mini` / `gpt-5-nano`".
+- **Five canonical docs** under [docs/](docs/) — append-only specs.
+
+**Hard rules to keep this maintainable solo**
+
+1. **Docs first.** Before changing behavior, read the relevant section
+   in `docs/ARCHITECTURE.md` and `docs/API.md`. If your change adds /
+   removes a CLI flag, env var, or output schema, update those docs in
+   the same commit and add a `[Unreleased]` line in `docs/CHANGELOG.md`.
+2. **Single source of truth per concept.** New configurable? Add a field
+   to `Settings` in `config.py` — do NOT sprinkle a new `os.getenv(...)`
+   in random modules. New model id? Add it to `ALLOWED_MODELS` in
+   `models.py` — do NOT hardcode the string elsewhere.
+3. **Tests are the contract.** Every behavior change ships with a test
+   in `tests/`. Run `uv run pytest` before declaring done; the coverage
+   gate is 80% and currently sits at ~94%.
+4. **No silent fallbacks.** If something can't happen, log it WARNING /
+   raise — never `except Exception: pass`. Bad config aborts startup
+   with a clear message; same for unknown models or unparseable TOML.
+5. **Append-only artifacts.** `outbound_email.{txt,json}` schema +
+   `risk_flags` allow-list are public surface. Add new flags / fields;
+   don't repurpose old ones.
+6. **One re-runnable installer.** All onboarding goes through
+   `./scripts/install.sh`. If you add a new dependency or scaffold step,
+   put it there so the next clone is still one command.
+
+**Common workflows**
+
+```bash
+# Add a Python dep
+uv add <pkg>            # runtime
+uv add --dev <pkg>      # tests / lint
+
+# Add a frontend dep
+cd src/frontend && bun add <pkg>
+
+# Run the full verification gate (this is the "is it green?" check)
+uv run pytest
+
+# Run only what you changed
+uv run pytest tests/test_config.py -v
+
+# Hot-reload backend (auto-reload on file change)
+uv run infotech-email-agent dev
+
+# Diagnostics: env, key, bundle status
+uv run infotech-email-agent doctor
+```
+
+**When you bump a model id, an output schema, a CLI flag, or env var**
+
+The change is not done until you have:
+1. Updated [docs/API.md](docs/API.md).
+2. Added a `[Unreleased]` entry to [docs/CHANGELOG.md](docs/CHANGELOG.md).
+3. Run `uv run pytest` to green.
+
 ## Docs
 
 Canonical docs (see [docs/](docs/)):
 
+- [docs/WALKTHROUGH.md](docs/WALKTHROUGH.md) — plain-English tour of the whole repo with mermaid diagrams. Start here.
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — module map and invariants.
 - [docs/API.md](docs/API.md) — CLI flags, env vars, Python API, exit codes.
 - [docs/TESTING.md](docs/TESTING.md) — verification commands and Definition of Done.
 - [docs/RUNBOOK.md](docs/RUNBOOK.md) — setup, run, troubleshooting.
 - [docs/CHANGELOG.md](docs/CHANGELOG.md) — change history.
-- [frontend/README.md](frontend/README.md) — optional React + Vite + TypeScript dashboard, launched by the `infotech-email-agent` Typer CLI (FastAPI adapter at `src/invoice_agent_web/`).
+- [src/frontend/README.md](src/frontend/README.md) — optional React + Vite + TypeScript dashboard, launched by the `infotech-email-agent` Typer CLI (FastAPI adapter at `src/invoice_agent_web/`).
 
 ## Tests
 
@@ -359,7 +529,7 @@ The repository ships a multi-stage [Dockerfile](Dockerfile) and a
 
 | Stage      | Purpose                                                  |
 |------------|----------------------------------------------------------|
-| `frontend` | `oven/bun` builds the Vite bundle into `/frontend/dist`. |
+| `frontend` | `oven/bun` builds the Vite bundle into `/frontend/dist` (source: `src/frontend/`). |
 | `base`     | `python:3.12-slim` + `uv sync --frozen --no-dev` + tesseract. |
 | `runtime`  | Default target. Runs `infotech-email-agent up` on `:8000`. |
 | `test`     | Adds dev deps + `tests/`. `CMD` runs `uv run pytest -q`. |

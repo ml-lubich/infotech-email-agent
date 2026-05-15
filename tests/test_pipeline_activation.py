@@ -267,8 +267,11 @@ class TestPipelineLlmShotsFire:
         assert any(s["name"] == "critic_review" for s in written["pipeline"]["shots"])
         # Critic + injection findings made it into risk_flags.
         assert "verifier_disagreement_total_due" in written["risk_flags"]
-        assert "low_confidence_total_due" in written["risk_flags"]
-        assert "prompt_injection_attempt_in_document" in written["risk_flags"]
+        # Citable-evidence gate: low_confidence grades and unanchored
+        # injection aggregate tags are dropped from risk_flags. They
+        # still surface as INFO log lines on the relevant shot.
+        assert "low_confidence_total_due" not in written["risk_flags"]
+        assert "prompt_injection_attempt_in_document" not in written["risk_flags"]
 
         # Banner prepended to outbound_email.txt.
         txt = (out_dir / "outbound_email.txt").read_text(encoding="utf-8")

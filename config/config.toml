@@ -1,0 +1,48 @@
+# InfoTech Email Agent — project configuration
+# ---------------------------------------------------------------------------
+# This file is the single SHARED config used by BOTH:
+#
+#   * the CLI on the host        (uv run invoice-intake / infotech-email-agent)
+#   * the Docker container       (docker-compose mounts ./config -> /app/config)
+#
+# Precedence (lowest -> highest, later wins):
+#
+#   1. Hardcoded defaults
+#   2. Global TOML  (~/Library/Application Support/infotech-email-agent/config.toml on macOS,
+#                    XDG_CONFIG_HOME on Linux, %APPDATA% on Windows)
+#   3. THIS FILE    (config/config.toml in the repo)
+#   4. Environment variables   (INFOTECH_*  — INVOICE_* still honored as legacy alias)
+#   5. Command-line flags      (always win)
+#
+# Inspect what the agent actually sees:
+#
+#   uv run infotech-email-agent config show
+#   uv run infotech-email-agent config path
+#
+# SECRETS DO NOT GO HERE. OPENAI_API_KEY is read from .env / the environment
+# only. This file is for non-secret toggles and stays committed to git.
+# ---------------------------------------------------------------------------
+
+# --- Models --------------------------------------------------------------
+# Both must be in the assignment allow-list (see src/invoice_agent/models.py):
+#   gpt-5-mini, gpt-5-nano
+# Anything else aborts startup with a clear error.
+
+agent_model   = "gpt-5-mini"   # planner / orchestrator
+extract_model = "gpt-5-mini"   # vision pass over PDF page images
+critic_model  = "gpt-5-nano"   # cheap critic for Pass 3
+
+# --- LLM cost controls ---------------------------------------------------
+# Set true to SKIP Pass 3 (critic_review) + Pass 4 (injection_screen).
+# Deterministic checks still run. Use this when iterating locally and you
+# want to keep the OpenAI bill down.
+llm_disabled = false
+
+# --- Web dashboard -------------------------------------------------------
+# Used by `infotech-email-agent up` and the Docker container.
+web_host = "127.0.0.1"   # docker-compose overrides this to 0.0.0.0
+web_port = 8000
+
+# Where per-request case dirs (outbound_email.{txt,json}, run.log) land.
+# Leave commented to use the default: ./out/web/<case>/
+# web_runs_dir = "/app/out/web"

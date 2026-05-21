@@ -529,3 +529,41 @@ def test_config_path_is_machine_friendly(runner: CliRunner) -> None:
     lines = [ln for ln in result.output.strip().splitlines() if ln]
     assert any(ln.startswith("global=") for ln in lines)
     assert any(ln.startswith("project=") for ln in lines)
+
+
+# --------------------------------------------------------------------------- #
+# Regression: OPENAI_API_KEY must be loaded from .env before the key guard
+# (guards that the stale-tool-install / wrong-CWD scenario never regresses)
+# --------------------------------------------------------------------------- #
+
+
+def test_up_reads_openai_key_from_dotenv_file(
+    runner: CliRunner,
+    monkeypatch: pytest.MonkeyPatch,
+    no_side_effects: dict[str, list[Any]],
+    tmp_path: Path,
+) -> None:
+    """up succeeds when OPENAI_API_KEY is absent from the environment but
+    present in the .env file that load_dotenv is pointed at (REPO_ROOT/.env)."""
+    (tmp_path / ".env").write_text("OPENAI_API_KEY=sk-dotenv-regression-up\n", encoding="utf-8")
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.setattr(web_cli, "REPO_ROOT", tmp_path)
+    result = runner.invoke(web_cli.app, ["up", "--no-browser", "--port", "8877"])
+    assert result.exit_code == 0, result.output
+    assert no_side_effects["uvicorn"], "uvicorn.run was not invoked"
+
+
+def test_start_reads_openai_key_from_dotenv_file(
+    runner: CliRunner,
+    monkeypatch: pytest.MonkeyPatch,
+    lifecycle_env: dict[str, Any],
+    tmp_path: Path,
+) -> None:
+    """start succeeds when OPENAI_API_KEY is absent from the environment but
+    present in the .env file that load_dotenv is pointed at (REPO_ROOT/.env)."""
+    (tmp_path / ".env").write_text("OPENAI_API_KEY=sk-dotenv-regression-start\n", encoding="utf-8")
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.setattr(web_cli, "REPO_ROOT", tmp_path)
+    result = runner.invoke(web_cli.app, ["start", "--no-browser", "--port", "8878"])
+    assert result.exit_code == 0, result.output
+    assert lifecycle_env["spawn_calls"], "background server was not spawned"

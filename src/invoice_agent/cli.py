@@ -209,7 +209,7 @@ def _validate_preconditions(args: argparse.Namespace) -> int | None:
 
 def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv)
-    load_dotenv()
+    load_dotenv(Path(__file__).resolve().parents[2] / ".env")
 
     early_exit = _validate_preconditions(args)
     if early_exit is not None:

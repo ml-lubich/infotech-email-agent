@@ -166,7 +166,7 @@ main.py  ──►  invoice_agent.cli.main()
 | `invoice_agent/evidence.py` | Pure helpers that turn finding tags into AP-facing `Evidence` quotes (re-runs the named injection regex against the source text, formats verifier disagreements, reconstructs arithmetic mismatches). Constants `_QUOTE_MAX=240`, `_WINDOW_RADIUS=80`. No I/O. |
 | `invoice_agent/usage.py` | Per-run token-usage observability. Frozen `ShotUsage` per call, mutable `UsageMeter` accumulator. `extract_usage(response)` decodes the OpenAI Responses-API usage block (including `cached_tokens` and `reasoning_tokens`). Side-channel file `usage_extract.json` lets the extract tool publish its usage to the orchestrator across the Agents-SDK boundary. |
 | `invoice_agent_web/main.py` | **HTTP adapter** (FastAPI). Exposes `/api/health`, `/api/examples`, `/api/intake` (multipart upload), `/api/intake/example`. When `frontend/dist/` exists, also mounts the React bundle at `/` and `/assets/*` so the whole app runs on one port. Owns no business logic — stages inputs into a per-request case dir under `out/web/` and calls `invoice_agent.agent.run_intake`. Sync handlers (Agents SDK `Runner.run_sync` cannot run inside an active event loop). |
-| `invoice_agent_web/cli.py` | **Typer CLI** (console-script `infotech-email-agent`). Subcommands: `up` (foreground build+serve), `start`/`stop`/`restart`/`status` (background lifecycle via PID file), `dev` (backend with reload + Vite-dev instructions), `doctor` (env / deps), `version`. Prints ASCII banner + colour diagnostics. **This is the single launch surface** — there is no `run.sh`. |
+| `invoice_agent_web/cli.py` | **Typer CLI** (console-script `infotech-email-agent`). Subcommands: `up` (foreground build+serve), `start`/`stop`/`restart`/`status` (background lifecycle via PID file), `dev` (backend with reload + Vite-dev instructions), `doctor` (env / deps), `version`. Prints ASCII banner + colour diagnostics. Dotenv is loaded from `REPO_ROOT / ".env"` (not CWD-dependent discovery). **This is the single launch surface** — there is no `run.sh`. |
 | `frontend/` (under `src/frontend/`) | React + Vite + TypeScript dashboard. Renders the confidence gauge, per-shot timeline, risk-flag chips, extracted invoice, and outbound packet (txt / JSON / log) returned by `/api/intake`. Dev server (`bun run dev`) proxies `/api/*` to the FastAPI backend. See `src/frontend/README.md`. **Lives under `src/` so the whole project (Python packages + React app) sits in one tree.** |
 
 ## Data flow (sequence)
@@ -703,7 +703,8 @@ small: `build_agent()`, `run_intake(...)`, `IntakeResult`.
   `_print_result`, `_print_token_summary`, `_run_intake_or_report`.
 
 *Edges.* `agent.run_intake`, `logging_setup.configure`,
-`logging_setup.mirror_run_log`, `dotenv.load_dotenv`.
+`logging_setup.mirror_run_log`, `dotenv.load_dotenv` (explicit
+repo-root `.env` path via module-relative resolution).
 
 ### 2. Web adapter (`src/invoice_agent_web/`)
 
@@ -782,6 +783,11 @@ Helpers: `_pid_alive`, `_read_pid_file`, `_write_pid_file`,
 *Presentation.* ASCII banner (`_print_banner`), terminal-color
 detection (`_supports_color`, `_c`, `_C` palette), key/value status
 lines (`_print_kv`).
+
+*Dotenv invariant.* Launch commands that require key validation (`up`,
+`start`, `dev`, `doctor`, `config show`) resolve dotenv from
+`REPO_ROOT / ".env"`, so behavior is stable even when invoked from a
+different current working directory.
 
 ### 3. Frontend dashboard (`src/frontend/`)
 

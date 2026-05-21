@@ -31,6 +31,7 @@ import time
 import webbrowser
 from importlib.metadata import PackageNotFoundError, version as _pkg_version
 from pathlib import Path
+from typing import Iterable
 
 import typer
 from dotenv import load_dotenv
@@ -181,6 +182,83 @@ def _build_frontend(force: bool = False) -> None:
     if rc != 0:
         raise typer.Exit(code=rc)
     typer.echo(_c("  ✓ ", "green") + "frontend bundle built")
+
+
+def _add_case(
+    cases: dict[Path, Path | None], email_path: Path, pdf_path: Path | None
+) -> None:
+    current = cases.get(email_path)
+    if pdf_path is not None:
+        cases[email_path] = pdf_path
+        return
+    if current is None:
+        cases[email_path] = None
+
+
+def _scan_dir_cases(path: Path) -> list[Path]:
+    email_here = path / "Email.json"
+    if email_here.is_file():
+        return [email_here.resolve()]
+    emails: list[Path] = []
+    for child in sorted(path.iterdir(), key=lambda p: p.name):
+        if not child.is_dir():
+            continue
+        email = child / "Email.json"
+        if email.is_file():
+            emails.append(email.resolve())
+    return emails
+
+
+def _as_path_inputs(paths: Iterable[Path]) -> list[Path]:
+    resolved: list[Path] = []
+    for raw in paths:
+        path = Path(raw).expanduser().resolve()
+        if not path.exists():
+            raise typer.BadParameter(f"input path does not exist: {raw}")
+        resolved.append(path)
+    return resolved
+
+
+def discover_cases(paths: list[Path]) -> list[tuple[Path, Path | None]]:
+    """Classify free-form file/folder inputs into runnable case tuples.
+
+    Returns ``[(email_json_path, pdf_override_or_none), ...]``.
+    """
+    cases: dict[Path, Path | None] = {}
+    for path in _as_path_inputs(paths):
+        if path.is_dir():
+            for email in _scan_dir_cases(path):
+                _add_case(cases, email, None)
+            continue
+        suffix = path.suffix.lower()
+        if suffix == ".json":
+            _add_case(cases, path, None)
+            continue
+        if suffix == ".pdf":
+            email = (path.parent / "Email.json").resolve()
+            if not email.is_file():
+                raise typer.BadParameter(f"no sibling Email.json for PDF: {path}")
+            _add_case(cases, email, path)
+            continue
+        raise typer.BadParameter(f"unsupported input type: {path.name}")
+    return sorted(cases.items(), key=lambda item: str(item[0]))
+
+
+def _build_case_argv(
+    email_path: Path, pdf_path: Path | None, out_dir: Path | None
+) -> list[str]:
+    argv = ["--email", str(email_path)]
+    if pdf_path is not None:
+        argv.extend(["--pdf", str(pdf_path)])
+    if out_dir is not None:
+        case_out = (out_dir / email_path.parent.name).resolve()
+        argv.extend(["--out-dir", str(case_out)])
+    return argv
+
+
+def _set_no_llm_env() -> None:
+    os.environ["INFOTECH_PIPELINE_LLM_DISABLED"] = "1"
+    os.environ["INVOICE_PIPELINE_LLM_DISABLED"] = "1"
 
 
 # --------------------------------------------------------------------------- #
@@ -348,7 +426,7 @@ def up(
     ),
 ) -> None:
     """Build (if needed) and serve the dashboard on one port."""
-    load_dotenv()
+    load_dotenv(REPO_ROOT / ".env")
     _print_banner()
 
     has_key = bool(os.getenv("OPENAI_API_KEY"))
@@ -433,7 +511,7 @@ def start(
     ),
 ) -> None:
     """Start the dashboard in the background (writes a PID file)."""
-    load_dotenv()
+    load_dotenv(REPO_ROOT / ".env")
     _print_banner()
 
     existing = _read_pidfile()
@@ -591,7 +669,7 @@ def dev(
     port: int = typer.Option(8000, "--port", "-p", help="Port for the auto-reload backend."),
 ) -> None:
     """Run backend with auto-reload; Vite dev server is a separate terminal."""
-    load_dotenv()
+    load_dotenv(REPO_ROOT / ".env")
     _print_banner()
     typer.echo(_c("  Dev mode — two terminals:\n", "bold"))
     typer.echo(
@@ -638,7 +716,7 @@ def dev(
 )
 def doctor() -> None:
     """Print environment + dependency diagnostics."""
-    load_dotenv()
+    load_dotenv(REPO_ROOT / ".env")
     _print_banner()
     _print_kv("repo root", str(REPO_ROOT))
     _print_kv(
@@ -660,6 +738,78 @@ def doctor() -> None:
     )
     runs_dir = Path(os.getenv("INVOICE_WEB_RUNS_DIR") or (REPO_ROOT / "out" / "web"))
     _print_kv("runs dir", str(runs_dir), ok=runs_dir.exists() or True)
+
+
+@app.command(
+    "run",
+    epilog=(
+        "Examples:\n\n"
+        "  infotech-email-agent run examples/case_1\n"
+        "  infotech-email-agent run examples\n"
+        "  infotech-email-agent run examples/case_1/Invoice.pdf examples/case_1/Email.json\n"
+        "  infotech-email-agent run -f examples/case_1 -f examples/case_4_eur_consulting\n"
+    ),
+)
+def run_cases(
+    paths: list[Path] | None = typer.Argument(
+        None,
+        metavar="[PATHS]...",
+        help="Files (.json/.pdf) and/or folders (single case or folder of cases).",
+    ),
+    files: list[Path] | None = typer.Option(
+        None,
+        "-f",
+        "--file",
+        help="Additional input path (repeatable).",
+    ),
+    out_dir: Path | None = typer.Option(
+        None,
+        "--out-dir",
+        help="Root output dir. Each case writes to <out-dir>/<case-name>/.",
+    ),
+    no_llm: bool = typer.Option(
+        False,
+        "--no-llm",
+        help="Disable pipeline LLM shots (deterministic-only).",
+    ),
+    continue_on_error: bool = typer.Option(
+        True,
+        "--continue-on-error/--stop-on-error",
+        help="Continue running remaining cases after a failure.",
+    ),
+) -> None:
+    """Run one or many case inputs through the existing batch intake CLI."""
+    all_inputs = [*(paths or []), *(files or [])]
+    if not all_inputs:
+        typer.secho("ERROR: no inputs given", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=2)
+    if no_llm:
+        _set_no_llm_env()
+    cases = discover_cases(all_inputs)
+    if not cases:
+        typer.secho("ERROR: no runnable Email.json cases discovered", fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=2)
+
+    import invoice_agent.cli as core_cli
+
+    failed = 0
+    first_fail_code = 1
+    for email_path, pdf_path in cases:
+        argv = _build_case_argv(email_path, pdf_path, out_dir)
+        rc = core_cli.main(argv)
+        if rc == 0:
+            continue
+        failed += 1
+        first_fail_code = rc
+        if not continue_on_error:
+            raise typer.Exit(code=first_fail_code)
+    if failed:
+        typer.secho(
+            f"{failed} of {len(cases)} case(s) failed",
+            fg=typer.colors.RED,
+            err=True,
+        )
+        raise typer.Exit(code=1)
 
 
 @app.command()
@@ -697,7 +847,7 @@ def _project_config_path() -> Path | None:
 @config_app.command("show")
 def config_show() -> None:
     """Print the merged configuration and where each layer lives."""
-    load_dotenv()
+    load_dotenv(REPO_ROOT / ".env")
     settings = load_settings(project_start=REPO_ROOT)
     gpath = global_config_path()
     ppath = _project_config_path()

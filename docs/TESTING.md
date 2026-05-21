@@ -38,6 +38,10 @@ layer (per `docs/ARCHITECTURE.md`); its Typer CLI is exercised by
   `doctor`, `version`) so docs and the binary cannot silently drift;
 - asserts environment-var error paths (`OPENAI_API_KEY` missing → exit
   code `2` from `up` and `start`; warning printed by `dev`);
+- pins dotenv regression behavior: `up` and `start` must succeed when
+  `OPENAI_API_KEY` is absent from process env but present in a repo-root
+  `.env` (`test_up_reads_openai_key_from_dotenv_file`,
+  `test_start_reads_openai_key_from_dotenv_file`);
 - asserts `up` invokes uvicorn with the requested host/port and that
   `--rebuild` forces a fresh frontend build;
 - asserts the no-subcommand call delegates to `up` (default action);

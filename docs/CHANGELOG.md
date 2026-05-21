@@ -8,12 +8,45 @@ This project is pre-1.0; minor versions may include breaking changes.
 ## Table of contents
 
 - [[Unreleased]](#unreleased)
+- [[0.2.1] — dotenv path hardening + run CLI restoration](#021--dotenv-path-hardening--run-cli-restoration)
 - [[0.2.0] — web adapter, dashboard, observability](#020--web-adapter-dashboard-observability)
 - [[0.1.0] — initial cut](#010--initial-cut)
 
 ## [Unreleased]
 
 _(no entries yet)_
+
+## [0.2.1] — dotenv path hardening + run CLI restoration
+
+Released 2026-05-21.
+
+### Changed
+
+- Hardened dotenv loading for both launch surfaces so `.env` is always
+  resolved from the repository root, independent of the caller's current
+  working directory:
+  - `src/invoice_agent_web/cli.py` now calls
+    `load_dotenv(REPO_ROOT / ".env")` for `up`, `start`, `dev`,
+    `doctor`, and `config show`.
+  - `src/invoice_agent/cli.py` now calls
+    `load_dotenv(Path(__file__).resolve().parents[2] / ".env")`.
+  This prevents the false `OPENAI_API_KEY is not set` failure when the
+  console script is launched from a context where implicit CWD-relative
+  dotenv discovery misses the repo `.env`.
+
+- Restored the `infotech-email-agent run` command surface in
+  `src/invoice_agent_web/cli.py` (`run` subcommand + `discover_cases`
+  classifier), matching the behavior pinned by
+  `tests/test_web_cli_run.py`.
+
+### Added
+
+- Regression coverage in `tests/test_web_cli.py`:
+  - `test_up_reads_openai_key_from_dotenv_file`
+  - `test_start_reads_openai_key_from_dotenv_file`
+  Both tests patch `REPO_ROOT` to a temp directory with a synthetic
+  `.env`, clear `OPENAI_API_KEY` from the process environment, and pin
+  that the commands still start successfully.
 
 ## [0.2.0] — web adapter, dashboard, observability
 
